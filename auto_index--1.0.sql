@@ -1,7 +1,8 @@
-CREATE TABLE IF NOT EXISTS aidx_queries (
+CREATE TABLE aidx_queries (
     tablename TEXT,
-    colname TEXT,  -- <- rename this
-    cost DOUBLE PRECISION,
-    benefit DOUBLE PRECISION,
+    colname TEXT,
+    cost FLOAT,
+    benefit FLOAT,
+    num_queries INT,
     PRIMARY KEY (tablename, colname)
 );
