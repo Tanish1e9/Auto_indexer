@@ -1,110 +1,110 @@
-// Updated auto_index.c with debug logs
-#include "postgres.h"
-#include "fmgr.h"
-#include "optimizer/planner.h"
-#include "executor/spi.h"
-#include "utils/elog.h"
-#include "utils/lsyscache.h"
-#include "utils/rel.h"
-#include "catalog/pg_class.h"
-#include "math.h"
-
-#include "nodes/nodeFuncs.h"
-#include "parser/parsetree.h"
-
 #include "auto_index.h"
 
-#ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
-#endif
 
 planner_hook_type prev_planner_hook = NULL;
+bool got_sigterm = false, inside_hook = false;
 
-/* Extracts column name from WHERE clause (simple OpExpr with Var) */
-static char *
-extract_column_name(Node *qual, Index varno)
+static void handle_sigterm(int signum)
 {
-    if (!qual || !IsA(qual, OpExpr))
-        return NULL;
+    got_sigterm = true;
+}
 
-    OpExpr *opexpr = (OpExpr *) qual;
-    if (list_length(opexpr->args) < 2)
-        return NULL;
+PGDLLEXPORT void
+auto_index_worker_main(Datum main_arg)
+{
+    elog(LOG, "WORKER CHAL RHA H !!!!");
+    BackgroundWorkerInitializeConnection("postgres", NULL, 0);
 
-    Node *left = linitial(opexpr->args);
+    pqsignal(SIGTERM, handle_sigterm);
+    BackgroundWorkerUnblockSignals();
 
-    if (IsA(left, Var))
-    {
-        Var *var = (Var *) left;
-        if (var->varno == varno)
+    while (!got_sigterm){
+        elog(LOG, "WORKER WHILE LOOP ME H !!!!");
+        int ret, i;
+        CHECK_FOR_INTERRUPTS();
+
+        ret = SPI_connect();
+        if (ret != SPI_OK_CONNECT)
         {
-            return get_attname(var->varno, var->varattno, false);
+            elog(WARNING, "AutoIndexWorker: SPI_connect failed");
+            pg_usleep(5000000L); // Sleep 5s
+            continue;
         }
+        
+        elog(LOG, "Worker aaya");
+        const char *query = "SELECT tablename, colname FROM aidx_queries WHERE benefit * num_queries > cost;";
+
+        // ret = SPI_exec(query, 0);
+        // if (ret != SPI_OK_SELECT)
+        // {
+        //     elog(WARNING, "AutoIndexWorker: SPI_exec failed for SELECT");
+        //     SPI_finish();
+        //     pg_usleep(5000000L);
+        //     continue;
+        // }
+
+        // for (i = 0; i < SPI_processed; i++)
+        // {
+        //     char *tablename = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1);
+        //     char *colname = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2);
+
+        //     if (tablename && colname)
+        //     {
+        //         StringInfoData create_index;
+        //         initStringInfo(&create_index);
+
+        //         appendStringInfo(&create_index,
+        //             "CREATE INDEX IF NOT EXISTS idx_%s_%s ON %s (%s);",
+        //             tablename, colname, tablename, colname);
+
+        //         elog(LOG, "AutoIndexWorker: Creating index: %s", create_index.data);
+        //         SPI_exec(create_index.data, 0);
+
+        //         StringInfoData delete_entry;
+        //         initStringInfo(&delete_entry);
+        //         appendStringInfo(&delete_entry,
+        //             "DELETE FROM aidx_queries WHERE tablename = '%s' AND colname = '%s';",
+        //             tablename, colname);
+
+        //         SPI_exec(delete_entry.data, 0);
+
+        //         pfree(create_index.data);
+        //         pfree(delete_entry.data);
+        //     }
+        // }
+
+        SPI_finish();
+        pg_usleep(10000000L); // Sleep 10 seconds
     }
 
-    return NULL;
+    elog(LOG, "AutoIndexWorker: Server shutting down, exiting...");
+    proc_exit(0);  // Clean exit
 }
+
 
 static PlannedStmt *
 auto_index_planner_hook(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams)
 {
-    elog(LOG, "AutoIndex: planner hook triggered");
+    elog(LOG, "AutoIndex: Planner hook triggered");
 
     PlannedStmt *stmt;
-
-    if (prev_planner_hook && prev_planner_hook != auto_index_planner_hook)
-        stmt = prev_planner_hook(parse, query_string, cursorOptions, boundParams);
-    else
-        stmt = standard_planner(parse, query_string, cursorOptions, boundParams);
-
-    Plan *plan = stmt->planTree;
-
-    if (IsA(plan, SeqScan))
-    {
-        Scan *scan = (Scan *) plan;
-        Index scanrelid = scan->scanrelid;
-        RangeTblEntry *rte = rt_fetch(scanrelid, parse->rtable);
-
-        Relation rel = relation_open(rte->relid, AccessShareLock);
-        const char *relname = RelationGetRelationName(rel);
-
-        double num_rows = rel->rd_rel->reltuples;
-        double cost = (num_rows > 0) ? num_rows * log2(num_rows) : 1000;
-        double benefit = plan->total_cost;
-
-        relation_close(rel, AccessShareLock);
-
-        /* Try to extract actual column name from WHERE clause */
-        char *colname = extract_column_name(parse->jointree->quals, scanrelid);
-        if (!colname)
-            colname = "unknown_col";
-
-        char sql[1024];
-        snprintf(sql, sizeof(sql),
-            "INSERT INTO aidx_queries (tablename, colname, cost, benefit, num_queries) "
-            "VALUES ('%s', '%s', %f, %f, 1) "
-            "ON CONFLICT (tablename, colname) DO UPDATE "
-            "SET benefit = aidx_queries.benefit + %f, "
-            "cost = %f, "
-            "num_queries = aidx_queries.num_queries + 1;",
-            relname, colname, cost, benefit, benefit, cost);
-
-        elog(LOG, "AutoIndex generated SQL: %s", sql);
-
-        if (SPI_connect() == SPI_OK_CONNECT)
-        {
-            int ret = SPI_exec(sql, 0);
-            if (ret != SPI_OK_INSERT && ret != SPI_OK_UPDATE)
-            {
-                elog(WARNING, "AutoIndex: SPI_exec failed with code %d", ret);
-            }
-            SPI_finish();
-        }
-        else
-        {
-            elog(WARNING, "AutoIndex: SPI_connect failed");
-        }
+    if(parse->commandType == CMD_SELECT){
+        elog(LOG, "AutoIndex: SELECT QUERY AAAAYA!!!");
+        
     }
+    
+    if (prev_planner_hook)
+    {
+        elog(LOG, "AutoIndex: If me ghuse");
+        stmt = prev_planner_hook(parse, query_string, cursorOptions, boundParams);
+    }
+    else
+    {
+        elog(LOG, "AutoIndex: else me ghuse");
+        stmt = standard_planner(parse, query_string, cursorOptions, boundParams);
+    }
+    
 
     return stmt;
 }
@@ -112,17 +112,27 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
 void
 _PG_init(void)
 {
-    elog(LOG, "AutoIndex: installing planner hook");
+    elog(LOG, "AutoIndex: Installing planner hook");
+
     if (planner_hook != auto_index_planner_hook)
     {
         prev_planner_hook = planner_hook;
         planner_hook = auto_index_planner_hook;
-    }
-}
 
-void
-_PG_fini(void)
-{
-    if (planner_hook == auto_index_planner_hook)
-        planner_hook = prev_planner_hook;
+        BackgroundWorker worker;
+
+        memset(&worker, 0, sizeof(worker));
+    
+        worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+        worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+        // worker.bgw_restart_time = 10; // Restart if the worker crashes
+        worker.bgw_restart_time = BGW_NEVER_RESTART;
+        snprintf(worker.bgw_name, BGW_MAXLEN, "AutoIndex Worker");
+    
+        /* Use library and function names instead of bgw_main */
+        sprintf(worker.bgw_library_name, "auto_index");
+        sprintf(worker.bgw_function_name,"auto_index_worker_main");
+    
+        RegisterBackgroundWorker(&worker);
+    }
 }

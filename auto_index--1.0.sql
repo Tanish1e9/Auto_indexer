@@ -1,4 +1,4 @@
-CREATE TABLE aidx_queries (
+CREATE TABLE IF NOT EXISTS aidx_queries (
     tablename TEXT,
     colname TEXT,
     cost FLOAT,
