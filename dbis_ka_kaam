@@ -17,3 +17,4 @@ pgdata me h postgresql.conf file
 
 pg_stat_statements extension does the same scanning work we have to do so might be useful to look at it
 ./configure --prefix=$HOME/pg_custom_build
+sudo lsof -i :5433
