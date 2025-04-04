@@ -13,3 +13,6 @@ for force stopping the database
 
 pgdata me h postgresql.conf file
 
+/home/tanish/pg_custom_build/bin/initdb -D ~/pgdata
+
+pg_stat_statements extension does the same scanning work we have to do so might be useful to look at it
