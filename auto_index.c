@@ -5,6 +5,36 @@ PG_MODULE_MAGIC;
 planner_hook_type prev_planner_hook = NULL;
 bool got_sigterm = false, inside_hook = false;
 
+static void log_rte_tables(Query *query)
+{
+    ListCell *lc;
+    foreach (lc, query->rtable)
+    {
+        RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+
+        switch (rte->rtekind)
+        {
+            case RTE_RELATION:
+                elog(LOG, "AutoIndex: Table: %s (relid = %u)", get_rel_name(rte->relid), rte->relid);
+                break;
+
+            case RTE_SUBQUERY:
+                elog(LOG, "AutoIndex: Found subquery");
+                if (rte->subquery)
+                    log_rte_tables(rte->subquery);  // recurse!
+                break;
+
+            case RTE_JOIN:
+                elog(LOG, "AutoIndex: Found join");
+                break;
+
+            default:
+                elog(LOG, "AutoIndex: Unhandled RTE kind: %d", rte->rtekind);
+                break;
+        }
+    }
+}
+
 static void handle_sigterm(int signum)
 {
     got_sigterm = true;
@@ -83,61 +113,87 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
 {
     elog(LOG, "AutoIndex: Planner hook triggered");
 
-    if (parse->commandType == CMD_SELECT)
-    {
-        elog(LOG, "AutoIndex: Processing SELECT query...");
-        start_auto_index_worker();
-        // Get tables
-        ListCell *lc;
-        foreach (lc, parse->rtable)
-        {
-            RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
-            if (rte->rtekind == RTE_RELATION)
-            {
-                elog(LOG, "AutoIndex: Table: %s", get_rel_name(rte->relid));
-            }
-        }
+    // if (parse->commandType == CMD_SELECT || 1)
+    // {
+    //     elog(LOG, "AutoIndex: Processing SELECT query...");
+    //     start_auto_index_worker();
+    //     // Get tables
+    //     ListCell *lc;
+    //     foreach (lc, parse->rtable)
+    //     {
+    //         RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+    //         // if (rte->rtekind == RTE_RELATION)
+    //         // {
+    //         // elog(LOG, "AutoIndex: Table: %s, %d", get_rel_name(rte->relid), rte->rtekind);
+    //         // }
+    //         switch (rte->rtekind)
+    //         {
+    //             case RTE_RELATION:
+    //                 elog(LOG, "AutoIndex: Table: %s (relid = %u)", get_rel_name(rte->relid), rte->relid);
+    //                 break;
 
-        // // Get selected attributes
-        // foreach (lc, parse->targetList)
-        // {
-        //     TargetEntry *tle = (TargetEntry *) lfirst(lc);
-        //     if (tle->resjunk) continue; // Skip system columns
+    //             case RTE_SUBQUERY:
+    //                 elog(LOG, "AutoIndex: Found subquery");
+    //                 log_rte_tables(rte->subquery); // recursive inspection
+    //                 break;
+
+    //             default:
+    //                 elog(LOG, "AutoIndex: Unhandled RTE kind: %d", rte->rtekind);
+    //                 break;
+    //         }
+    //     }
+
+    //     // // Get selected attributes
+    //     // foreach (lc, parse->targetList)
+    //     // {
+    //     //     TargetEntry *tle = (TargetEntry *) lfirst(lc);
+    //     //     if (tle->resjunk) continue; // Skip system columns
             
-        //     if (IsA(tle->expr, Var))
-        //     {
-        //         Var *var = (Var *) tle->expr;
+    //     //     if (IsA(tle->expr, Var))
+    //     //     {
+    //     //         Var *var = (Var *) tle->expr;
 
-        //         /* Get the corresponding RangeTblEntry */
-        //         RangeTblEntry *rte = (RangeTblEntry *) list_nth(parse->rtable, var->varno - 1);
+    //     //         /* Get the corresponding RangeTblEntry */
+    //     //         RangeTblEntry *rte = (RangeTblEntry *) list_nth(parse->rtable, var->varno - 1);
                 
-        //         if (rte->rtekind == RTE_RELATION) // Ensure it's a real table
-        //         {
-        //             const char *colname = get_attname(rte->relid, var->varattno, false);
-        //             elog(LOG, "AutoIndex: Table: %s, Column: %s", rte->eref->aliasname, colname);
-        //         }
-        //     }
-        // }
+    //     //         if (rte->rtekind == RTE_RELATION) // Ensure it's a real table
+    //     //         {
+    //     //             const char *colname = get_attname(rte->relid, var->varattno, false);
+    //     //             elog(LOG, "AutoIndex: Table: %s, Column: %s", rte->eref->aliasname, colname);
+    //     //         }
+    //     //     }
+    //     // }
 
-        // // Get WHERE conditions
-        // if (parse->jointree && parse->jointree->quals)
-        // {
-        //     Node *whereClause = parse->jointree->quals;
-        //     elog(LOG, "AutoIndex: WHERE clause detected!");
+    //     // // Get WHERE conditions
+    //     // if (parse->jointree && parse->jointree->quals)
+    //     // {
+    //     //     Node *whereClause = parse->jointree->quals;
+    //     //     elog(LOG, "AutoIndex: WHERE clause detected!");
 
-        //     if (IsA(whereClause, OpExpr))
-        //     {
-        //         OpExpr *op = (OpExpr *) whereClause;
-        //         elog(LOG, "AutoIndex: Operator used: %s", get_opname(op->opno));
-        //     }
-        // }
+    //     //     if (IsA(whereClause, OpExpr))
+    //     //     {
+    //     //         OpExpr *op = (OpExpr *) whereClause;
+    //     //         elog(LOG, "AutoIndex: Operator used: %s", get_opname(op->opno));
+    //     //     }
+    //     // }
+    // }
+
+    // PlannedStmt *stmt = prev_planner_hook ? 
+    //                     prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
+    //                     standard_planner(parse, query_string, cursorOptions, boundParams);
+
+    // return stmt;
+
+    // Call the standard planner to generate the execution plan
+    PlannedStmt *result = standard_planner(parse, query_string, cursorOptions, boundParams);
+
+    if (result && result->planTree)
+    {
+        elog(LOG, "AutoIndex: Estimated startup cost: %f", result->planTree->startup_cost);
+        elog(LOG, "AutoIndex: Estimated total cost: %f", result->planTree->total_cost);
     }
 
-    PlannedStmt *stmt = prev_planner_hook ? 
-                        prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
-                        standard_planner(parse, query_string, cursorOptions, boundParams);
-
-    return stmt;
+    return result;
 }
 
 void start_auto_index_worker(void) {
