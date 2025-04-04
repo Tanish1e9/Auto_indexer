@@ -1,0 +1,37 @@
+inside that contrib/auto_index
+source .bashrc
+make clean
+make
+make install
+
+~/pg_custom_build/bin/pg_ctl -D ~/pgdata -o "-p 5433" -l ~/logfile restart
+~/pg_custom_build/bin/psql -p 5433 -d postgres
+
+
+for force stopping the database
+~/pg_custom_build/bin/pg_ctl -D ~/pgdata stop -m immediate
+
+pgdata me h postgresql.conf file
+
+~/pg_custom_build/bin/initdb -D ~/pgdata
+
+pg_stat_statements extension does the same scanning work we have to do so might be useful to look at it
+./configure --prefix=$HOME/pg_custom_build
+sudo lsof -i :5433
+
+RangeTblEntry: has a entry called RTEkind which tells the type of relation (typedef enum RTEKind
+                                                                            {
+                                                                                RTE_RELATION,				/* ordinary relation reference */
+                                                                                RTE_SUBQUERY,				/* subquery in FROM */
+                                                                                RTE_JOIN,					/* join */
+                                                                                RTE_FUNCTION,				/* function in FROM */
+                                                                                RTE_TABLEFUNC,				/* TableFunc(.., column list) */
+                                                                                RTE_VALUES,					/* VALUES (<exprlist>), (<exprlist>), ... */
+                                                                                RTE_CTE,					/* common table expr (WITH list element) */
+                                                                                RTE_NAMEDTUPLESTORE,		/* tuplestore, e.g. for AFTER triggers */
+                                                                                RTE_RESULT,					/* RTE represents an empty FROM clause; such
+                                                                                                            * RTEs are added by the planner, they're not
+                                                                                                            * present during parsing or rewriting */
+                                                                                RTE_GROUP,					/* the grouping step */
+                                                                            } RTEKind;)
+
