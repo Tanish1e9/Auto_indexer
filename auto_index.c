@@ -24,7 +24,7 @@ auto_index_worker_main(Datum main_arg)
         proc_exit(1);
     }
 
-	int ret = SPI_execute("select my_index_creator();", true, 0);
+	int ret = SPI_execute("select my_index_creator('stud','id');", true, 0);
 	if(ret != SPI_OK_SELECT){
 		elog(WARNING, "AutoIndexWorker: SPI_exec failed for SELECT");
 		SPI_finish();
