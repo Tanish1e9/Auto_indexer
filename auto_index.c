@@ -6,6 +6,243 @@ planner_hook_type prev_planner_hook = NULL;
 
 static void handle_sigterm(int signum){proc_exit(1);}
 
+double extract_total_cost_from_json(const char *json)
+{
+    Jsonb *jb;
+    JsonbIterator *it;
+    JsonbValue v;
+    JsonbValue key;
+    JsonbValue val;
+    double total_cost = -1.0;
+
+    // Convert string to Jsonb
+    Datum json_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(json));
+    jb = DatumGetJsonbP(json_datum);
+
+    it = JsonbIteratorInit(&jb->root);
+
+    JsonbIteratorToken r;
+    bool in_plan = false;
+
+    while ((r = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
+    {
+        if (r == WJB_KEY)
+        {
+            if (v.type == jbvString && strcmp(v.val.string.val, "Plan") == 0)
+            {
+                in_plan = true;
+            }
+            else if (in_plan && v.type == jbvString && strcmp(v.val.string.val, "Total Cost") == 0)
+            {
+                // Next value will be the actual cost
+                r = JsonbIteratorNext(&it, &val, true);
+                if (val.type == jbvNumeric)
+                {
+                    total_cost = DatumGetFloat8(DirectFunctionCall1(numeric_float8, NumericGetDatum(val.val.numeric)));
+                    break;
+                }
+            }
+        }
+    }
+
+    return total_cost;
+}
+
+
+
+double estimate_index_creation_cost(const char *table, const char *column)
+{
+    StringInfoData query;
+    SPI_connect();
+    initStringInfo(&query);
+
+    appendStringInfo(&query,
+        "EXPLAIN (FORMAT JSON) CREATE INDEX idx_temp_%s_%s ON %s(%s);",
+        table, column, table, column);
+
+    int ret = SPI_execute(query.data, true, 0);
+    if (ret != SPI_OK_SELECT || SPI_processed == 0)
+    {
+        elog(WARNING, "Failed to EXPLAIN CREATE INDEX");
+        SPI_finish();
+        return -1.0;
+    }
+
+    char *json_str = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+                                                       SPI_tuptable->tupdesc,
+                                                       1,
+                                                       NULL));
+
+    double cost = extract_total_cost_from_json(json_str);
+
+    SPI_finish();
+    return cost;
+}
+
+double estimate_index_benefit(const char *table, const char *column, const char *value)
+{
+    StringInfoData base_query, index_query;
+    SPI_connect();
+
+    initStringInfo(&base_query);
+    initStringInfo(&index_query);
+
+    appendStringInfo(&base_query,
+        "EXPLAIN (FORMAT JSON) SELECT * FROM %s WHERE %s = '%s';",
+        table, column, value);
+
+    appendStringInfo(&index_query,
+        "SET enable_seqscan = OFF;");
+
+    // Get plan cost *with* index
+    SPI_execute(index_query.data, false, 0);
+    int ret = SPI_execute(base_query.data, true, 0);
+    if (ret != SPI_OK_SELECT || SPI_processed == 0)
+    {
+        elog(WARNING, "Failed to EXPLAIN SELECT with index");
+        SPI_finish();
+        return -1.0;
+    }
+
+    char *json_str_index = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+                                                             SPI_tuptable->tupdesc,
+                                                             1,
+                                                             NULL));
+    double cost_with_index = extract_total_cost_from_json(json_str_index);
+
+    // Re-enable seqscan
+    SPI_execute("SET enable_seqscan = ON;", false, 0);
+
+    // Get plan cost *without* index
+    SPI_execute(base_query.data, true, 0);
+    char *json_str_seq = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+                                                           SPI_tuptable->tupdesc,
+                                                           1,
+                                                           NULL));
+    double cost_without_index = extract_total_cost_from_json(json_str_seq);
+
+    SPI_finish();
+
+    double benefit = cost_without_index - cost_with_index;
+    return benefit > 0 ? benefit : 0.0;
+}
+
+
+
+static List *extract_columns_from_expr(Node *node, List *rtable)
+{
+    List *colnames = NIL;
+
+    if (node == NULL)
+        return colnames;
+
+    if (IsA(node, Var))
+    {
+        Var *var = (Var *) node;
+
+        if (var->varno > 0 && var->varno <= list_length(rtable))
+        {
+            RangeTblEntry *rte = list_nth_node(RangeTblEntry, rtable, var->varno - 1);
+            if (rte->rtekind == RTE_RELATION)
+            {
+                const char *colname = get_attname(rte->relid, var->varattno, false);
+                const char *tablename = get_rel_name(rte->relid);
+
+                elog(LOG, "Referenced column: %s.%s", tablename, colname);
+
+                // Avoid duplicates
+                bool found = false;
+                ListCell *lc;
+                foreach(lc, colnames)
+                {
+                    if (strcmp(colname, (char *) lfirst(lc)) == 0)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                    colnames = lappend(colnames, pstrdup(colname));
+            }
+        }
+    }
+    else if (IsA(node, OpExpr))
+    {
+        OpExpr *op = (OpExpr *) node;
+        ListCell *lc;
+        foreach(lc, op->args)
+        {
+            List *subcols = extract_columns_from_expr((Node *) lfirst(lc), rtable);
+            colnames = list_concat_unique(colnames, subcols);
+        }
+    }
+    else if (IsA(node, BoolExpr))
+    {
+        BoolExpr *b = (BoolExpr *) node;
+        ListCell *lc;
+        foreach(lc, b->args)
+        {
+            List *subcols = extract_columns_from_expr((Node *) lfirst(lc), rtable);
+            colnames = list_concat_unique(colnames, subcols);
+        }
+    }
+    else if (IsA(node, RelabelType))
+    {
+        RelabelType *relab = (RelabelType *) node;
+        List *subcols = extract_columns_from_expr((Node *) relab->arg, rtable);
+        colnames = list_concat_unique(colnames, subcols);
+    }
+
+    return colnames;
+}
+
+static void find_seqscans(Plan *plan, List *rtable)
+{
+    if (plan == NULL)
+        return;
+
+    if (IsA(plan, SeqScan))
+    {
+        SeqScan *seq = (SeqScan *) plan;
+        Index relid_index = seq->scan.scanrelid;
+
+        RangeTblEntry *rte = list_nth_node(RangeTblEntry, rtable, relid_index - 1);
+        const char *table_name = get_rel_name(rte->relid);
+
+        elog(LOG, "SeqScan on table: %s", table_name);
+
+        if (plan->qual)
+        {
+            ListCell *lc;
+            foreach(lc, plan->qual)
+            {
+                Node *qual_node = (Node *) lfirst(lc);
+                List *colnames = extract_columns_from_expr(qual_node, rtable);
+
+                ListCell *cell;
+                foreach(cell, colnames)
+                {
+                    char *colname = (char *) lfirst(cell);
+
+                    // Use a representative value for estimation
+                    const char *sample_value = "123";  // You could make this smarter
+
+                    double creation_cost = estimate_index_creation_cost(table_name, colname);
+                    double benefit = estimate_index_benefit(table_name, colname, sample_value);
+
+                    elog(LOG, "Column: %s | Index Creation Cost: %.2f | Benefit: %.2f",
+                         colname, creation_cost, benefit);
+                }
+            }
+        }
+    }
+
+    // Recurse into child plans
+    find_seqscans(plan->lefttree, rtable);
+    find_seqscans(plan->righttree, rtable);
+}
+
 PGDLLEXPORT void
 auto_index_worker_main(Datum main_arg)
 {
@@ -44,40 +281,16 @@ auto_index_worker_main(Datum main_arg)
 
 
 static PlannedStmt *
-auto_index_planner_hook(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams)
-{
+auto_index_planner_hook(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams){
     elog(LOG, "AutoIndex: Planner hook triggered");
-
-    if (parse->commandType == CMD_SELECT)
-    {
-        elog(LOG, "AutoIndex: Processing SELECT query...");
-        start_auto_index_worker();
-        // Get tables
-        ListCell *lc;
-        foreach (lc, parse->rtable)
-        {
-            RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
-            switch (rte->rtekind)
-            {
-                case RTE_RELATION:
-                    elog(LOG, "AutoIndex: Table: %s (relid = %u)", get_rel_name(rte->relid), rte->relid);
-                    break;
-
-                case RTE_SUBQUERY:
-                    elog(LOG, "AutoIndex: Found subquery");
-                    log_rte_tables(rte->subquery); // recursive inspection
-                    break;
-
-                default:
-                    elog(LOG, "AutoIndex: Unhandled RTE kind: %d", rte->rtekind);
-                    break;
-            }
-        }
-    }
 
     PlannedStmt *stmt = prev_planner_hook ? 
                         prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
                         standard_planner(parse, query_string, cursorOptions, boundParams);
+
+	if (stmt){
+		find_seqscans(stmt->planTree, stmt->rtable);
+	}
 
     return stmt;
 }

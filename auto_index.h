@@ -4,6 +4,9 @@
 #include "postgres.h"
 #include "postmaster/interrupt.h"
 #include "storage/lwlock.h"
+#include "utils/json.h"
+#include "utils/jsonb.h"
+
 
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
