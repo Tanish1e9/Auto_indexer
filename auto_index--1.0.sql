@@ -6,10 +6,13 @@ CREATE FUNCTION auto_index_cleanup() RETURNS event_trigger
     AS 'MODULE_PATHNAME', 'auto_index_cleanup'
     LANGUAGE C STRICT;
 
-
 CREATE EVENT TRIGGER auto_index_cleanup_tri ON sql_drop
     WHEN TAG IN ('DROP EXTENSION')
     EXECUTE FUNCTION auto_index_cleanup();
+
+CREATE FUNCTION my_index_creator() RETURNS void
+    AS 'auto_index', 'my_index_creator'
+    LANGUAGE C VOLATILE;
 
 ALTER EXTENSION auto_index DROP EVENT TRIGGER auto_index_cleanup_tri;
 ALTER EXTENSION auto_index DROP FUNCTION auto_index_cleanup();

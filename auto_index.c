@@ -60,7 +60,8 @@ auto_index_worker_main(Datum main_arg)
         proc_exit(1);
     }
 
-	int ret = SPI_execute("select 8;", true, 0);
+	// int ret = SPI_execute("create index on stud(id);", true, 0);
+	int ret = SPI_execute("select my_index_creator();", true, 0);
 	if(ret != SPI_OK_SELECT){
 		elog(WARNING, "AutoIndexWorker: SPI_exec failed for SELECT");
 		SPI_finish();
@@ -127,35 +128,35 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
 {
     elog(LOG, "AutoIndex: Planner hook triggered");
 
-    // if (parse->commandType == CMD_SELECT || 1)
-    // {
-    //     elog(LOG, "AutoIndex: Processing SELECT query...");
-    //     start_auto_index_worker();
-    //     // Get tables
-    //     ListCell *lc;
-    //     foreach (lc, parse->rtable)
-    //     {
-    //         RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
-    //         // if (rte->rtekind == RTE_RELATION)
-    //         // {
-    //         // elog(LOG, "AutoIndex: Table: %s, %d", get_rel_name(rte->relid), rte->rtekind);
-    //         // }
-    //         switch (rte->rtekind)
-    //         {
-    //             case RTE_RELATION:
-    //                 elog(LOG, "AutoIndex: Table: %s (relid = %u)", get_rel_name(rte->relid), rte->relid);
-    //                 break;
+    if (parse->commandType == CMD_SELECT)
+    {
+        elog(LOG, "AutoIndex: Processing SELECT query...");
+        start_auto_index_worker();
+        // Get tables
+        // ListCell *lc;
+        // foreach (lc, parse->rtable)
+        // {
+        //     RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+        //     // if (rte->rtekind == RTE_RELATION)
+        //     // {
+        //     // elog(LOG, "AutoIndex: Table: %s, %d", get_rel_name(rte->relid), rte->rtekind);
+        //     // }
+        //     switch (rte->rtekind)
+        //     {
+        //         case RTE_RELATION:
+        //             elog(LOG, "AutoIndex: Table: %s (relid = %u)", get_rel_name(rte->relid), rte->relid);
+        //             break;
 
-    //             case RTE_SUBQUERY:
-    //                 elog(LOG, "AutoIndex: Found subquery");
-    //                 log_rte_tables(rte->subquery); // recursive inspection
-    //                 break;
+        //         case RTE_SUBQUERY:
+        //             elog(LOG, "AutoIndex: Found subquery");
+        //             log_rte_tables(rte->subquery); // recursive inspection
+        //             break;
 
-    //             default:
-    //                 elog(LOG, "AutoIndex: Unhandled RTE kind: %d", rte->rtekind);
-    //                 break;
-    //         }
-    //     }
+        //         default:
+        //             elog(LOG, "AutoIndex: Unhandled RTE kind: %d", rte->rtekind);
+        //             break;
+        //     }
+        // }
 
     //     // // Get selected attributes
     //     // foreach (lc, parse->targetList)
@@ -190,24 +191,24 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
     //     //         elog(LOG, "AutoIndex: Operator used: %s", get_opname(op->opno));
     //     //     }
     //     // }
-    // }
-
-    // PlannedStmt *stmt = prev_planner_hook ? 
-    //                     prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
-    //                     standard_planner(parse, query_string, cursorOptions, boundParams);
-
-    // return stmt;
-
-    // Call the standard planner to generate the execution plan
-    PlannedStmt *result = standard_planner(parse, query_string, cursorOptions, boundParams);
-
-    if (result && result->planTree)
-    {
-        elog(LOG, "AutoIndex: Estimated startup cost: %f", result->planTree->startup_cost);
-        elog(LOG, "AutoIndex: Estimated total cost: %f", result->planTree->total_cost);
     }
 
-    return result;
+    PlannedStmt *stmt = prev_planner_hook ? 
+                        prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
+                        standard_planner(parse, query_string, cursorOptions, boundParams);
+
+    return stmt;
+
+    // Call the standard planner to generate the execution plan
+    // PlannedStmt *result = standard_planner(parse, query_string, cursorOptions, boundParams);
+
+    // if (result && result->planTree)
+    // {
+    //     elog(LOG, "AutoIndex: Estimated startup cost: %f", result->planTree->startup_cost);
+    //     elog(LOG, "AutoIndex: Estimated total cost: %f", result->planTree->total_cost);
+    // }
+
+    // return result;
 }
 
 void start_auto_index_worker(void) {
@@ -272,4 +273,19 @@ auto_index_cleanup(PG_FUNCTION_ARGS)
 	SPI_finish();
 
     PG_RETURN_VOID();
+}
+
+Datum
+my_index_creator(PG_FUNCTION_ARGS)
+{
+    const char *query = "CREATE INDEX IF NOT EXISTS idx_stud_id ON stud(id);";
+
+    if (SPI_connect() != SPI_OK_CONNECT)
+        elog(ERROR, "SPI_connect failed");
+
+    int ret = SPI_execute(query, false, 0);
+    if (ret != SPI_OK_UTILITY)
+        elog(ERROR, "Index creation failed");
+
+    SPI_finish();
 }
