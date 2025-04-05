@@ -40,5 +40,7 @@ static PlannedStmt *auto_index_planner_hook(Query *parse, const char *query_stri
 PGDLLEXPORT void auto_index_worker_main(Datum main_arg);
 void start_auto_index_worker(void);
 
+PG_FUNCTION_INFO_V1(auto_index_force_init);
+PG_FUNCTION_INFO_V1(auto_index_cleanup);
 
 #endif

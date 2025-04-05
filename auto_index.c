@@ -15,18 +15,31 @@ static void handle_sigterm(int signum)
 PGDLLEXPORT void
 auto_index_worker_main(Datum main_arg)
 {
+	BackgroundWorkerInitializeConnection("postgres", NULL , 0);
     elog(LOG, "WORKER CHAL RHA H !!!!");
-    BackgroundWorkerInitializeConnection("postgres", NULL, 0);
 
     pqsignal(SIGTERM, handle_sigterm);
     BackgroundWorkerUnblockSignals();
 
-    int ret = SPI_connect();
-    if (ret != SPI_OK_CONNECT)
+	StartTransactionCommand();
+	PushActiveSnapshot(GetTransactionSnapshot());
+    if (SPI_connect() != SPI_OK_CONNECT)
     {
         elog(WARNING, "AutoIndexWorker: SPI_connect failed");
+		AbortCurrentTransaction();
         proc_exit(1);
     }
+
+	int ret = SPI_execute("select 8;", true, 0);
+	if(ret != SPI_OK_SELECT){
+		elog(WARNING, "AutoIndexWorker: SPI_exec failed for SELECT");
+		SPI_finish();
+		AbortCurrentTransaction();
+		proc_exit(1);
+	}
+
+	elog(LOG, "AutoIndexWorker: SPI_exec successful");
+	elog(LOG, "AutoIndexWorker: SPI processed %lu rows", SPI_processed);
 
     // /* Fetch queries needing an index */
     // const char *query = "SELECT tablename, colname FROM aidx_queries WHERE benefit * num_queries > cost;";
@@ -72,9 +85,10 @@ auto_index_worker_main(Datum main_arg)
     // }
 
     SPI_finish();
+	PopActiveSnapshot();
+	CommitTransactionCommand();
 
     elog(LOG, "AutoIndexWorker: Index creation completed, exiting.");
-    pg_usleep(10000000L);  // 1 second
 }
 
 
@@ -170,13 +184,36 @@ void start_auto_index_worker(void) {
     }
 }
 
+Datum
+auto_index_force_init(PG_FUNCTION_ARGS)
+{
+    elog(LOG, "auto_index_force_init() was called!");
+	if (planner_hook != auto_index_planner_hook){
+		prev_planner_hook = planner_hook;
+		planner_hook = auto_index_planner_hook;
+	}
+    PG_RETURN_VOID();
+}
 
-void
-_PG_init(void){
-    elog(LOG, "AutoIndex: Installing planner hook");
+Datum
+auto_index_cleanup(PG_FUNCTION_ARGS)
+{
+    elog(LOG, "AutoIndex: Cleaning up and restoring original planner hook");
 
-    if (planner_hook != auto_index_planner_hook){
-        prev_planner_hook = planner_hook;
-        planner_hook = auto_index_planner_hook;
-    }
+    if (planner_hook == auto_index_planner_hook)
+        planner_hook = prev_planner_hook;
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+        elog(ERROR, "SPI_connect failed");
+
+	// Statement 1: Drop the event trigger itself
+	SPI_execute("DROP EVENT TRIGGER IF EXISTS auto_index_cleanup_tri;", false, 0);
+
+	// Statement 2: Drop the cleanup function
+	SPI_execute("DROP FUNCTION IF EXISTS auto_index_cleanup();", false, 0);
+
+
+	SPI_finish();
+
+    PG_RETURN_VOID();
 }
