@@ -3,44 +3,8 @@
 PG_MODULE_MAGIC;
 
 planner_hook_type prev_planner_hook = NULL;
-bool got_sigterm = false, inside_hook = false;
 
-static void log_rte_tables(Query *query)
-{
-    ListCell *lc;
-    foreach (lc, query->rtable)
-    {
-        RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
-
-        switch (rte->rtekind)
-        {
-            case RTE_RELATION:
-                elog(LOG, "AutoIndex: Table: %s (relid = %u)", get_rel_name(rte->relid), rte->relid);
-                break;
-
-            case RTE_SUBQUERY:
-                elog(LOG, "AutoIndex: Found subquery");
-                if (rte->subquery)
-                    log_rte_tables(rte->subquery);  // recurse!
-                break;
-
-            case RTE_JOIN:
-                elog(LOG, "AutoIndex: Found join");
-                break;
-
-            default:
-                elog(LOG, "AutoIndex: Unhandled RTE kind: %d", rte->rtekind);
-                break;
-        }
-    }
-}
-
-static void handle_sigterm(int signum)
-{
-    got_sigterm = true;
-    proc_exit(1);
-}
-
+static void handle_sigterm(int signum){proc_exit(1);}
 
 PGDLLEXPORT void
 auto_index_worker_main(Datum main_arg)
@@ -60,7 +24,6 @@ auto_index_worker_main(Datum main_arg)
         proc_exit(1);
     }
 
-	// int ret = SPI_execute("create index on stud(id);", true, 0);
 	int ret = SPI_execute("select my_index_creator();", true, 0);
 	if(ret != SPI_OK_SELECT){
 		elog(WARNING, "AutoIndexWorker: SPI_exec failed for SELECT");
@@ -71,49 +34,6 @@ auto_index_worker_main(Datum main_arg)
 
 	elog(LOG, "AutoIndexWorker: SPI_exec successful");
 	elog(LOG, "AutoIndexWorker: SPI processed %lu rows", SPI_processed);
-
-    // /* Fetch queries needing an index */
-    // const char *query = "SELECT tablename, colname FROM aidx_queries WHERE benefit * num_queries > cost;";
-    // ret = SPI_execute(query, true, 0);
-
-    // if (ret != SPI_OK_SELECT)
-    // {
-    //     elog(WARNING, "AutoIndexWorker: SPI_exec failed for SELECT");
-    //     SPI_finish();
-    //     proc_exit(1);
-    // }
-
-    // for (int i = 0; i < SPI_processed; i++)
-    // {
-    //     char *tablename = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1);
-    //     char *colname = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2);
-
-    //     if (tablename && colname)
-    //     {
-    //         /* Create Index */
-    //         StringInfoData create_index;
-    //         initStringInfo(&create_index);
-    //         appendStringInfo(&create_index,
-    //             "CREATE INDEX IF NOT EXISTS idx_%s_%s ON %s (%s);",
-    //             tablename, colname, tablename, colname);
-            
-    //         elog(LOG, "AutoIndexWorker: Creating index: %s", create_index.data);
-    //         SPI_execute(create_index.data, false, 0);
-
-    //         /* Remove from aidx_queries after index creation */
-    //         StringInfoData delete_entry;
-    //         initStringInfo(&delete_entry);
-    //         appendStringInfo(&delete_entry,
-    //             "DELETE FROM aidx_queries WHERE tablename = '%s' AND colname = '%s';",
-    //             tablename, colname);
-
-    //         SPI_execute(delete_entry.data, false, 0);
-
-    //         /* Free memory */
-    //         pfree(create_index.data);
-    //         pfree(delete_entry.data);
-    //     }
-    // }
 
     SPI_finish();
 	PopActiveSnapshot();
@@ -133,64 +53,26 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
         elog(LOG, "AutoIndex: Processing SELECT query...");
         start_auto_index_worker();
         // Get tables
-        // ListCell *lc;
-        // foreach (lc, parse->rtable)
-        // {
-        //     RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
-        //     // if (rte->rtekind == RTE_RELATION)
-        //     // {
-        //     // elog(LOG, "AutoIndex: Table: %s, %d", get_rel_name(rte->relid), rte->rtekind);
-        //     // }
-        //     switch (rte->rtekind)
-        //     {
-        //         case RTE_RELATION:
-        //             elog(LOG, "AutoIndex: Table: %s (relid = %u)", get_rel_name(rte->relid), rte->relid);
-        //             break;
+        ListCell *lc;
+        foreach (lc, parse->rtable)
+        {
+            RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+            switch (rte->rtekind)
+            {
+                case RTE_RELATION:
+                    elog(LOG, "AutoIndex: Table: %s (relid = %u)", get_rel_name(rte->relid), rte->relid);
+                    break;
 
-        //         case RTE_SUBQUERY:
-        //             elog(LOG, "AutoIndex: Found subquery");
-        //             log_rte_tables(rte->subquery); // recursive inspection
-        //             break;
+                case RTE_SUBQUERY:
+                    elog(LOG, "AutoIndex: Found subquery");
+                    log_rte_tables(rte->subquery); // recursive inspection
+                    break;
 
-        //         default:
-        //             elog(LOG, "AutoIndex: Unhandled RTE kind: %d", rte->rtekind);
-        //             break;
-        //     }
-        // }
-
-    //     // // Get selected attributes
-    //     // foreach (lc, parse->targetList)
-    //     // {
-    //     //     TargetEntry *tle = (TargetEntry *) lfirst(lc);
-    //     //     if (tle->resjunk) continue; // Skip system columns
-            
-    //     //     if (IsA(tle->expr, Var))
-    //     //     {
-    //     //         Var *var = (Var *) tle->expr;
-
-    //     //         /* Get the corresponding RangeTblEntry */
-    //     //         RangeTblEntry *rte = (RangeTblEntry *) list_nth(parse->rtable, var->varno - 1);
-                
-    //     //         if (rte->rtekind == RTE_RELATION) // Ensure it's a real table
-    //     //         {
-    //     //             const char *colname = get_attname(rte->relid, var->varattno, false);
-    //     //             elog(LOG, "AutoIndex: Table: %s, Column: %s", rte->eref->aliasname, colname);
-    //     //         }
-    //     //     }
-    //     // }
-
-    //     // // Get WHERE conditions
-    //     // if (parse->jointree && parse->jointree->quals)
-    //     // {
-    //     //     Node *whereClause = parse->jointree->quals;
-    //     //     elog(LOG, "AutoIndex: WHERE clause detected!");
-
-    //     //     if (IsA(whereClause, OpExpr))
-    //     //     {
-    //     //         OpExpr *op = (OpExpr *) whereClause;
-    //     //         elog(LOG, "AutoIndex: Operator used: %s", get_opname(op->opno));
-    //     //     }
-    //     // }
+                default:
+                    elog(LOG, "AutoIndex: Unhandled RTE kind: %d", rte->rtekind);
+                    break;
+            }
+        }
     }
 
     PlannedStmt *stmt = prev_planner_hook ? 
@@ -198,17 +80,6 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
                         standard_planner(parse, query_string, cursorOptions, boundParams);
 
     return stmt;
-
-    // Call the standard planner to generate the execution plan
-    // PlannedStmt *result = standard_planner(parse, query_string, cursorOptions, boundParams);
-
-    // if (result && result->planTree)
-    // {
-    //     elog(LOG, "AutoIndex: Estimated startup cost: %f", result->planTree->startup_cost);
-    //     elog(LOG, "AutoIndex: Estimated total cost: %f", result->planTree->total_cost);
-    // }
-
-    // return result;
 }
 
 void start_auto_index_worker(void) {
@@ -278,14 +149,25 @@ auto_index_cleanup(PG_FUNCTION_ARGS)
 Datum
 my_index_creator(PG_FUNCTION_ARGS)
 {
-    const char *query = "CREATE INDEX IF NOT EXISTS idx_stud_id ON stud(id);";
+    text *table_text = PG_GETARG_TEXT_P(0);
+    text *column_text = PG_GETARG_TEXT_P(1);
+
+    char *table_name = text_to_cstring(table_text);
+    char *col_name = text_to_cstring(column_text);
+
+    StringInfoData query;
+    initStringInfo(&query);
+    appendStringInfo(&query,
+        "CREATE INDEX IF NOT EXISTS idx_%s_%s ON %s (%s);",
+        table_name, col_name, table_name, col_name);
 
     if (SPI_connect() != SPI_OK_CONNECT)
         elog(ERROR, "SPI_connect failed");
 
-    int ret = SPI_execute(query, false, 0);
+    int ret = SPI_execute(query.data, false, 0);
     if (ret != SPI_OK_UTILITY)
         elog(ERROR, "Index creation failed");
 
     SPI_finish();
+    PG_RETURN_VOID();
 }

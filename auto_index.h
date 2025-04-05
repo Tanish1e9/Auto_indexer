@@ -5,6 +5,11 @@
 #include "postmaster/interrupt.h"
 #include "storage/lwlock.h"
 
+#include "nodes/execnodes.h"
+#include "nodes/plannodes.h"
+#include "parser/parsetree.h"
+#include "utils/rel.h"
+
 /* these headers are used by this particular worker's code */
 #include "access/xact.h"
 #include "pgstat.h"
