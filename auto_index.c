@@ -211,6 +211,7 @@ static void find_seqscans(Plan *plan, List *rtable)
         const char *table_name = get_rel_name(rte->relid);
 
         elog(LOG, "SeqScan on table: %s", table_name);
+        elog(LOG, "SeqScan cost: %.2f", plan->startup_cost + plan->total_cost);
 
         if (plan->qual)
         {
@@ -220,20 +221,20 @@ static void find_seqscans(Plan *plan, List *rtable)
                 Node *qual_node = (Node *) lfirst(lc);
                 List *colnames = extract_columns_from_expr(qual_node, rtable);
 
-                ListCell *cell;
-                foreach(cell, colnames)
-                {
-                    char *colname = (char *) lfirst(cell);
+                // ListCell *cell;
+                // foreach(cell, colnames)
+                // {
+                //     char *colname = (char *) lfirst(cell);
 
-                    // Use a representative value for estimation
-                    const char *sample_value = "123";  // You could make this smarter
+                //     // Use a representative value for estimation
+                //     const char *sample_value = "123";  // You could make this smarter
 
-                    double creation_cost = estimate_index_creation_cost(table_name, colname);
-                    double benefit = estimate_index_benefit(table_name, colname, sample_value);
+                //     double creation_cost = estimate_index_creation_cost(table_name, colname);
+                //     double benefit = estimate_index_benefit(table_name, colname, sample_value);
 
-                    elog(LOG, "Column: %s | Index Creation Cost: %.2f | Benefit: %.2f",
-                         colname, creation_cost, benefit);
-                }
+                //     elog(LOG, "Column: %s | Index Creation Cost: %.2f | Benefit: %.2f",
+                //          colname, creation_cost, benefit);
+                // }
             }
         }
     }

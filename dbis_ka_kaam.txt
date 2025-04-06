@@ -1,3 +1,5 @@
+https://www.crunchydata.com/blog/building-postgresql-extensions-dropping-extensions-and-cleanup
+
 inside that contrib/auto_index
 source .bashrc
 make clean
@@ -19,19 +21,33 @@ pg_stat_statements extension does the same scanning work we have to do so might 
 ./configure --prefix=$HOME/pg_custom_build
 sudo lsof -i :5433
 
-RangeTblEntry: has a entry called RTEkind which tells the type of relation (typedef enum RTEKind
-                                                                            {
-                                                                                RTE_RELATION,				/* ordinary relation reference */
-                                                                                RTE_SUBQUERY,				/* subquery in FROM */
-                                                                                RTE_JOIN,					/* join */
-                                                                                RTE_FUNCTION,				/* function in FROM */
-                                                                                RTE_TABLEFUNC,				/* TableFunc(.., column list) */
-                                                                                RTE_VALUES,					/* VALUES (<exprlist>), (<exprlist>), ... */
-                                                                                RTE_CTE,					/* common table expr (WITH list element) */
-                                                                                RTE_NAMEDTUPLESTORE,		/* tuplestore, e.g. for AFTER triggers */
-                                                                                RTE_RESULT,					/* RTE represents an empty FROM clause; such
-                                                                                                            * RTEs are added by the planner, they're not
-                                                                                                            * present during parsing or rewriting */
-                                                                                RTE_GROUP,					/* the grouping step */
-                                                                            } RTEKind;)
+RangeTblEntry: has a entry called RTEkind which tells the type of relation 
+(typedef enum RTEKind
+{
+RTE_RELATION,				/* ordinary relation reference */
+RTE_SUBQUERY,				/* subquery in FROM */
+RTE_JOIN,					/* join */
+RTE_FUNCTION,				/* function in FROM */
+RTE_TABLEFUNC,				/* TableFunc(.., column list) */
+RTE_VALUES,					/* VALUES (<exprlist>), (<exprlist>), ... */
+RTE_CTE,					/* common table expr (WITH list element) */
+RTE_NAMEDTUPLESTORE,		/* tuplestore, e.g. for AFTER triggers */
+RTE_RESULT,					/* RTE represents an empty FROM clause; such
+                            * RTEs are added by the planner, they're not
+                            * present during parsing or rewriting */
+RTE_GROUP,					/* the grouping step */
+} RTEKind;)
 
+
+SELECT reltuples, relpages FROM pg_class WHERE relname = 'id1';     // to find actual number of tuples and pages in a table
+
+
+https://www.interdb.jp/pg/pgsql03/02/index.html ------------ OP ARTICLE ON COST ESTIMATION
+
+
+// some formulae by chatgpt
+index_entry_size ≈ data_type_size + 12  -- 12 bytes for TID + overhead  (decent approximation)
+index_pages = index_entry_size * num_tuples / block_size
+index_creation_cost ≈ (seq_page_cost × table_pages) + (cpu_operator_cost × N × log2(N)) + (random_page_cost × index_pages)
+
+clause_selectivity and related functions can be used to calculate selectivity
