@@ -110,6 +110,9 @@ void delete_entry(const char *outer_key, const char *inner_key) {
 
 bool is_column_indexed(const char *table_name, const char *column_name)
 {
+    if (table_name == NULL || column_name == NULL)
+        return false;
+
     Oid relid = RelnameGetRelid(table_name);
     if (!OidIsValid(relid)) {
         elog(WARNING, "Table \"%s\" not found", table_name);
@@ -117,11 +120,9 @@ bool is_column_indexed(const char *table_name, const char *column_name)
     }
 
     Relation rel = relation_open(relid, AccessShareLock);
-
-    // Safety: check if it's a regular table
     if (rel->rd_rel->relkind != RELKIND_RELATION) {
-        elog(WARNING, "\"%s\" is not a regular table", table_name);
         relation_close(rel, AccessShareLock);
+        elog(WARNING, "\"%s\" is not a regular table", table_name);
         return false;
     }
 
@@ -129,42 +130,40 @@ bool is_column_indexed(const char *table_name, const char *column_name)
     bool found = false;
 
     for (ListCell *lc = list_head(index_list); lc != NULL; lc = lnext(index_list, lc)) {
-        Oid index_oid = lfirst_oid(lc);
-        if(index_oid <= 0) continue;
-        Relation index_rel = index_open(index_oid, AccessShareLock);
-
-        HeapTuple index_tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
-        if (!HeapTupleIsValid(index_tuple)) {
-            elog(WARNING, "Index OID %u not found", index_oid);
-            return;
+        Oid indexoid = lfirst_oid(lc);
+        HeapTuple indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexoid));
+        if (!HeapTupleIsValid(indexTuple)) {
+            elog(WARNING, "Failed to lookup index OID %u", indexoid);
+            continue;
         }
 
-        Form_pg_index index_form = (Form_pg_index) GETSTRUCT(index_tuple);
-        Oid relid = index_form->indrelid;
+        Form_pg_index index_form = (Form_pg_index) GETSTRUCT(indexTuple);
         int num_keys = index_form->indnkeyatts;
-
-        elog(LOG, "Index defined on %d column(s):", num_keys);
 
         for (int i = 0; i < num_keys; i++) {
             AttrNumber attnum = index_form->indkey.values[i];
-            if (attnum <= 0) {
-                elog(LOG, "Index uses expression or system column (attnum: %d)", attnum);
+
+            // Skip invalid entries
+            if (attnum <= 0)
                 continue;
-            }
 
             const char *colname = get_attname(relid, attnum, false);
-            elog(LOG, "Column %d: %s", attnum, colname);
+            if (colname && strcmp(colname, column_name) == 0) {
+                elog(LOG, "Column \"%s\" is indexed by index OID %u", column_name, indexoid);
+                found = true;
+                break;
+            }
         }
 
-        ReleaseSysCache(index_tuple);
-        index_close(index_rel, AccessShareLock);
+        ReleaseSysCache(indexTuple);
+        if (found)
+            break;
     }
 
     list_free(index_list);
     relation_close(rel, AccessShareLock);
     return found;
 }
-
 
 static List *
 extract_columns_from_expr(Node *node, List *rtable)
