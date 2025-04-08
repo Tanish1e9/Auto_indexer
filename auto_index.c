@@ -111,50 +111,56 @@ void delete_entry(const char *outer_key, const char *inner_key) {
 bool is_column_indexed(const char *table_name, const char *column_name)
 {
     Oid relid = RelnameGetRelid(table_name);
-
     if (!OidIsValid(relid)) {
-        elog(WARNING, "Table '%s' not found", table_name);
+        elog(WARNING, "Table \"%s\" not found", table_name);
         return false;
     }
 
     Relation rel = relation_open(relid, AccessShareLock);
 
-    // Only regular tables
+    // Safety: check if it's a regular table
     if (rel->rd_rel->relkind != RELKIND_RELATION) {
+        elog(WARNING, "\"%s\" is not a regular table", table_name);
         relation_close(rel, AccessShareLock);
-        elog(WARNING, "'%s' is not a regular table", table_name);
         return false;
     }
 
     List *index_list = RelationGetIndexList(rel);
-    ListCell *lc;
     bool found = false;
 
-    foreach(lc, index_list)
-    {
+    for (ListCell *lc = list_head(index_list); lc != NULL; lc = lnext(index_list, lc)) {
         Oid index_oid = lfirst_oid(lc);
         Relation index_rel = index_open(index_oid, AccessShareLock);
 
-        int natts = index_rel->rd_index->indnatts;
-        for (int i = 0; i < natts; i++) {
-            AttrNumber attnum = index_rel->rd_index->indkey.values[i];
-            const char *colname = get_attname(relid, attnum, false);
+        if (index_rel->rd_index == NULL) {
+            elog(WARNING, "Index relation metadata is NULL");
+            index_close(index_rel, AccessShareLock);
+            continue;
+        }
 
+        for (int i = 0; i < index_rel->rd_index->indnatts; i++) {
+            AttrNumber attnum = index_rel->rd_index->indkey.values[i];
+
+            // Sanity check: skip invalid or system attribute numbers
+            if (attnum <= 0)
+                continue;
+
+            const char *colname = get_attname(relid, attnum, false);
             if (colname && strcmp(colname, column_name) == 0) {
-                elog(LOG, "Column '%s' is indexed by '%s'", column_name, RelationGetRelationName(index_rel));
+                elog(LOG, "Column \"%s\" is indexed by \"%s\"", column_name, RelationGetRelationName(index_rel));
                 found = true;
-                break;
+                index_close(index_rel, AccessShareLock);
+                list_free(index_list);
+                relation_close(rel, AccessShareLock);
+                return found;
             }
         }
 
         index_close(index_rel, AccessShareLock);
-        if (found)
-            break;
     }
 
     list_free(index_list);
     relation_close(rel, AccessShareLock);
-
     return found;
 }
 
@@ -275,11 +281,11 @@ static void find_seqscans(Plan *plan, List *rtable)
                     else{
                         // num_queries,benefit,cost,is_indexed
                         MyStruct new_entry = {1, 40, 120, 0};
-                        add_entry(table_name, colname, new_entry);
                         if(is_column_indexed(table_name, colname)){
                             elog(LOG, "Column %s is already indexed", colname);
                             new_entry.is_indexed = 1;
                         }
+                        add_entry(table_name, colname, new_entry);
                     }
                 }
             }
