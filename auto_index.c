@@ -130,32 +130,33 @@ bool is_column_indexed(const char *table_name, const char *column_name)
 
     for (ListCell *lc = list_head(index_list); lc != NULL; lc = lnext(index_list, lc)) {
         Oid index_oid = lfirst_oid(lc);
+        if(index_oid <= 0) continue;
         Relation index_rel = index_open(index_oid, AccessShareLock);
 
-        if (index_rel->rd_index == NULL) {
-            elog(WARNING, "Index relation metadata is NULL");
-            index_close(index_rel, AccessShareLock);
-            continue;
+        HeapTuple index_tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
+        if (!HeapTupleIsValid(index_tuple)) {
+            elog(WARNING, "Index OID %u not found", index_oid);
+            return;
         }
 
-        for (int i = 0; i < index_rel->rd_index->indnatts; i++) {
-            AttrNumber attnum = index_rel->rd_index->indkey.values[i];
+        Form_pg_index index_form = (Form_pg_index) GETSTRUCT(index_tuple);
+        Oid relid = index_form->indrelid;
+        int num_keys = index_form->indnkeyatts;
 
-            // Sanity check: skip invalid or system attribute numbers
-            if (attnum <= 0)
+        elog(LOG, "Index defined on %d column(s):", num_keys);
+
+        for (int i = 0; i < num_keys; i++) {
+            AttrNumber attnum = index_form->indkey.values[i];
+            if (attnum <= 0) {
+                elog(LOG, "Index uses expression or system column (attnum: %d)", attnum);
                 continue;
+            }
 
             const char *colname = get_attname(relid, attnum, false);
-            if (colname && strcmp(colname, column_name) == 0) {
-                elog(LOG, "Column \"%s\" is indexed by \"%s\"", column_name, RelationGetRelationName(index_rel));
-                found = true;
-                index_close(index_rel, AccessShareLock);
-                list_free(index_list);
-                relation_close(rel, AccessShareLock);
-                return found;
-            }
+            elog(LOG, "Column %d: %s", attnum, colname);
         }
 
+        ReleaseSysCache(index_tuple);
         index_close(index_rel, AccessShareLock);
     }
 
