@@ -100,68 +100,64 @@ void delete_entry(const char *outer_key, const char *inner_key) {
     }
 }
 
-void process_index_scan_columns(Plan *plan, List *rtable)
+#include "postgres.h"
+#include "catalog/indexing.h"
+#include "catalog/namespace.h"
+#include "utils/rel.h"
+#include "utils/syscache.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
+
+bool is_column_indexed(const char *table_name, const char *column_name)
 {
-    if (plan == NULL)
-        return;
+    Oid relid = RelnameGetRelid(table_name);
 
-    if (!IsA(plan, IndexScan) && !IsA(plan, IndexOnlyScan))
-        return;
-
-    IndexScan *idx = (IndexScan *) plan;
-
-    // Sanity check: scanrelid should be valid
-    if (idx->scan.scanrelid <= 0 || idx->scan.scanrelid > list_length(rtable)) {
-        elog(WARNING, "Invalid scanrelid: %d", idx->scan.scanrelid);
-        return;
+    if (!OidIsValid(relid)) {
+        elog(WARNING, "Table '%s' not found", table_name);
+        return false;
     }
 
-    RangeTblEntry *rte = list_nth_node(RangeTblEntry, rtable, idx->scan.scanrelid - 1);
-    Oid relid = rte->relid;
-    const char *table_name = get_rel_name(relid);
+    Relation rel = relation_open(relid, AccessShareLock);
 
-    if (table_name == NULL) {
-        elog(WARNING, "Failed to get table name for relid %u", relid);
-        return;
+    // Only regular tables
+    if (rel->rd_rel->relkind != RELKIND_RELATION) {
+        relation_close(rel, AccessShareLock);
+        elog(WARNING, "'%s' is not a regular table", table_name);
+        return false;
     }
 
-    elog(LOG, "IndexScan on table: %s", table_name);
+    List *index_list = RelationGetIndexList(rel);
+    ListCell *lc;
+    bool found = false;
 
-    Oid index_oid = idx->indexid;
-    HeapTuple ht_idx = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
+    foreach(lc, index_list)
+    {
+        Oid index_oid = lfirst_oid(lc);
+        Relation index_rel = index_open(index_oid, AccessShareLock);
 
-    if (!HeapTupleIsValid(ht_idx)) {
-        elog(WARNING, "Could not find catalog entry for index OID: %u", index_oid);
-        return;
-    }
+        int natts = index_rel->rd_index->indnatts;
+        for (int i = 0; i < natts; i++) {
+            AttrNumber attnum = index_rel->rd_index->indkey.values[i];
+            const char *colname = get_attname(relid, attnum, false);
 
-    Form_pg_index index_form = (Form_pg_index) GETSTRUCT(ht_idx);
-    int num_keys = index_form->indnkeyatts;
-
-    for (int i = 0; i < num_keys; i++) {
-        AttrNumber attnum = index_form->indkey.values[i];
-        if (attnum <= 0) {
-            continue;
-        }
-
-        const char *colname = get_attname(relid, attnum, false);
-        if (colname){
-            elog(LOG, "Column in index definition: %s", colname);
-            MyStruct *entry = get_entry(table_name, colname);
-            if(entry){
-                entry->is_indexed = 1;
-                entry->num_queries++;
-            }
-            else{
-                // num_queries,benefit,cost,is_indexed
-                MyStruct new_entry = {1, 40, 120, 1};
-                add_entry(table_name, colname, new_entry);
+            if (colname && strcmp(colname, column_name) == 0) {
+                elog(LOG, "Column '%s' is indexed by '%s'", column_name, RelationGetRelationName(index_rel));
+                found = true;
+                break;
             }
         }
+
+        index_close(index_rel, AccessShareLock);
+        if (found)
+            break;
     }
 
-    ReleaseSysCache(ht_idx);
+    list_free(index_list);
+    relation_close(rel, AccessShareLock);
+
+    return found;
 }
+
 
 static List *
 extract_columns_from_expr(Node *node, List *rtable)
@@ -280,6 +276,10 @@ static void find_seqscans(Plan *plan, List *rtable)
                         // num_queries,benefit,cost,is_indexed
                         MyStruct new_entry = {1, 40, 120, 0};
                         add_entry(table_name, colname, new_entry);
+                        if(is_column_indexed(table_name, colname)){
+                            elog(LOG, "Column %s is already indexed", colname);
+                            new_entry.is_indexed = 1;
+                        }
                     }
                 }
             }
@@ -346,7 +346,6 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
                         standard_planner(parse, query_string, cursorOptions, boundParams);
 
 	if (stmt){
-        process_index_scan_columns(stmt->planTree, stmt->rtable);
 		find_seqscans(stmt->planTree, stmt->rtable);
 	}
 
