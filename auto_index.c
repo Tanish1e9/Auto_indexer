@@ -100,71 +100,6 @@ void delete_entry(const char *outer_key, const char *inner_key) {
     }
 }
 
-#include "postgres.h"
-#include "catalog/indexing.h"
-#include "catalog/namespace.h"
-#include "utils/rel.h"
-#include "utils/syscache.h"
-#include "utils/builtins.h"
-#include "utils/lsyscache.h"
-
-bool is_column_indexed(const char *table_name, const char *column_name)
-{
-    if (table_name == NULL || column_name == NULL)
-        return false;
-
-    Oid relid = RelnameGetRelid(table_name);
-    if (!OidIsValid(relid)) {
-        elog(WARNING, "Table \"%s\" not found", table_name);
-        return false;
-    }
-
-    Relation rel = relation_open(relid, AccessShareLock);
-    if (rel->rd_rel->relkind != RELKIND_RELATION) {
-        relation_close(rel, AccessShareLock);
-        elog(WARNING, "\"%s\" is not a regular table", table_name);
-        return false;
-    }
-
-    List *index_list = RelationGetIndexList(rel);
-    bool found = false;
-
-    for (ListCell *lc = list_head(index_list); lc != NULL; lc = lnext(index_list, lc)) {
-        Oid indexoid = lfirst_oid(lc);
-        HeapTuple indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexoid));
-        if (!HeapTupleIsValid(indexTuple)) {
-            elog(WARNING, "Failed to lookup index OID %u", indexoid);
-            continue;
-        }
-
-        Form_pg_index index_form = (Form_pg_index) GETSTRUCT(indexTuple);
-        int num_keys = index_form->indnkeyatts;
-
-        for (int i = 0; i < num_keys; i++) {
-            AttrNumber attnum = index_form->indkey.values[i];
-
-            // Skip invalid entries
-            if (attnum <= 0)
-                continue;
-
-            const char *colname = get_attname(relid, attnum, false);
-            if (colname && strcmp(colname, column_name) == 0) {
-                elog(LOG, "Column \"%s\" is indexed by index OID %u", column_name, indexoid);
-                found = true;
-                break;
-            }
-        }
-
-        ReleaseSysCache(indexTuple);
-        if (found)
-            break;
-    }
-
-    list_free(index_list);
-    relation_close(rel, AccessShareLock);
-    return found;
-}
-
 static List *
 extract_columns_from_expr(Node *node, List *rtable)
 {
@@ -212,7 +147,6 @@ extract_columns_from_expr(Node *node, List *rtable)
 
     return colnames;
 }
-
 
 static void find_seqscans(Plan *plan, List *rtable)
 {
@@ -281,10 +215,6 @@ static void find_seqscans(Plan *plan, List *rtable)
                     else{
                         // num_queries,benefit,cost,is_indexed
                         MyStruct new_entry = {1, 40, 120, 0};
-                        if(is_column_indexed(table_name, colname)){
-                            elog(LOG, "Column %s is already indexed", colname);
-                            new_entry.is_indexed = 1;
-                        }
                         add_entry(table_name, colname, new_entry);
                     }
                 }
