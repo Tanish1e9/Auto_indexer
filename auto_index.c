@@ -239,7 +239,7 @@ auto_index_worker_main(Datum main_arg){
 
 
 	BackgroundWorkerInitializeConnection("postgres", NULL , 0);
-    elog(LOG, "WORKER CHAL RHA H !!!!");
+    elog(LOG, "WORKER FUNCTION IS RUNNING!!!!");
 
     pqsignal(SIGTERM, handle_sigterm);
     BackgroundWorkerUnblockSignals();
