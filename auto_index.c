@@ -100,6 +100,69 @@ void delete_entry(const char *outer_key, const char *inner_key) {
     }
 }
 
+void process_index_scan_columns(Plan *plan, List *rtable)
+{
+    if (plan == NULL)
+        return;
+
+    if (!IsA(plan, IndexScan) && !IsA(plan, IndexOnlyScan))
+        return;
+
+    IndexScan *idx = (IndexScan *) plan;
+
+    // Sanity check: scanrelid should be valid
+    if (idx->scan.scanrelid <= 0 || idx->scan.scanrelid > list_length(rtable)) {
+        elog(WARNING, "Invalid scanrelid: %d", idx->scan.scanrelid);
+        return;
+    }
+
+    RangeTblEntry *rte = list_nth_node(RangeTblEntry, rtable, idx->scan.scanrelid - 1);
+    Oid relid = rte->relid;
+    const char *table_name = get_rel_name(relid);
+
+    if (table_name == NULL) {
+        elog(WARNING, "Failed to get table name for relid %u", relid);
+        return;
+    }
+
+    elog(LOG, "IndexScan on table: %s", table_name);
+
+    Oid index_oid = idx->indexid;
+    HeapTuple ht_idx = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
+
+    if (!HeapTupleIsValid(ht_idx)) {
+        elog(WARNING, "Could not find catalog entry for index OID: %u", index_oid);
+        return;
+    }
+
+    Form_pg_index index_form = (Form_pg_index) GETSTRUCT(ht_idx);
+    int num_keys = index_form->indnkeyatts;
+
+    for (int i = 0; i < num_keys; i++) {
+        AttrNumber attnum = index_form->indkey.values[i];
+        if (attnum <= 0) {
+            continue;
+        }
+
+        const char *colname = get_attname(relid, attnum, false);
+        if (colname){
+            elog(LOG, "Column in index definition: %s", colname);
+            MyStruct *entry = get_entry(table_name, colname);
+            if(entry){
+                entry->is_indexed = 1;
+                entry->num_queries++;
+            }
+            else{
+                // num_queries,benefit,cost,is_indexed
+                MyStruct new_entry = {1, 40, 120, 1};
+                add_entry(table_name, colname, new_entry);
+            }
+        }
+    }
+
+    ReleaseSysCache(ht_idx);
+}
+
 static List *
 extract_columns_from_expr(Node *node, List *rtable)
 {
@@ -203,14 +266,12 @@ static void find_seqscans(Plan *plan, List *rtable)
 
                     MyStruct *entry = get_entry(table_name, colname);
                     if(entry){
-                        elog(LOG, "Entry found for %s,%s", table_name, colname);
+                        entry->num_queries++;
                         if(entry->is_indexed == 0){   
-                            entry->num_queries++;
                             if(entry->benefit * entry->num_queries > entry->cost){
                                 entry->is_indexed = 1;
                                 strcpy(table_name_glob, table_name);
                                 strcpy(col_name_glob, colname);
-                                elog(LOG, "Creating index on %s,%s", table_name_glob, col_name_glob);
                                 start_auto_index_worker();
                             }
                         }
@@ -224,7 +285,6 @@ static void find_seqscans(Plan *plan, List *rtable)
             }
         }
     }
-
     // Recurse into child plans
     find_seqscans(plan->lefttree, rtable);
     find_seqscans(plan->righttree, rtable);
@@ -286,6 +346,7 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
                         standard_planner(parse, query_string, cursorOptions, boundParams);
 
 	if (stmt){
+        process_index_scan_columns(stmt->planTree, stmt->rtable);
 		find_seqscans(stmt->planTree, stmt->rtable);
 	}
 
@@ -334,8 +395,8 @@ auto_index_force_init(PG_FUNCTION_ARGS)
 		planner_hook = auto_index_planner_hook;
 	}
 
-    table_name_glob = (char*)(malloc (100 * sizeof(char)));
-    col_name_glob = (char*)(malloc (100 * sizeof(char)));
+    table_name_glob = (char*)(malloc (64 * sizeof(char)));
+    col_name_glob = (char*)(malloc (64 * sizeof(char)));
     PG_RETURN_VOID();
 }
 

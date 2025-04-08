@@ -3,6 +3,7 @@
 
 #include "postgres.h"
 #include "uthash.h"
+#include "utils/syscache.h"
 
 #include "postmaster/interrupt.h"
 #include "storage/lwlock.h"
