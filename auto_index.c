@@ -145,8 +145,6 @@ extract_columns_from_expr(Node *node, List *rtable)
         colnames = list_concat(colnames, extract_columns_from_expr((Node *) r->arg, rtable));
     }
 
-    // Add more cases here as needed (e.g., ScalarArrayOpExpr, NullTest, etc.)
-
     return colnames;
 }
 
@@ -358,8 +356,8 @@ auto_index_cleanup(PG_FUNCTION_ARGS)
 	// Statement 2: Drop the cleanup function
 	SPI_execute("DROP FUNCTION IF EXISTS auto_index_cleanup();", false, 0);
 
-
 	SPI_finish();
+    free_all();
 
     PG_RETURN_VOID();
 }
@@ -379,7 +377,7 @@ my_index_creator(PG_FUNCTION_ARGS)
         elog(ERROR, "Table or column name is NULL");
         proc_exit(1);
     }
-    elog(LOG, "NAHI ANA CHAHYE");
+
     elog(LOG, "Creating index on %s.%s", table_name, col_name);
     StringInfoData query;
     initStringInfo(&query);
