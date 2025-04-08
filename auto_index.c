@@ -163,6 +163,29 @@ static void find_seqscans(Plan *plan, List *rtable)
 
         RangeTblEntry *rte = list_nth_node(RangeTblEntry, rtable, relid_index - 1);
         const char *table_name = get_rel_name(rte->relid);
+        Oid relid = rte->relid;
+        Oid nspid = get_rel_namespace(relid);
+        const char *nspname = get_namespace_name(nspid);
+        char relkind = get_rel_relkind(relid);  // 'r', 'v', 'm', 'i', etc.
+
+        if (!nspname ||
+            strcmp(nspname, "pg_catalog") == 0 ||
+            strcmp(nspname, "information_schema") == 0 ||
+            strncmp(nspname, "pg_toast", 8) == 0 ||
+            strncmp(nspname, "pg_temp", 7) == 0 ||
+            relkind != RELKIND_RELATION)  // not a regular table
+        {
+            elog(LOG, "Skipping system or non-user table: %s", get_rel_name(relid));
+            return;
+        }
+
+        // Optional: check if current user can SELECT from the table
+        if (pg_class_aclcheck(relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+        {
+            elog(LOG, "Skipping table %s: no SELECT permissions", table_name);
+            return;
+        }
+
 
         elog(LOG, "SeqScan on table: %s", table_name);
         elog(LOG, "SeqScan cost: %.2f", plan->startup_cost + plan->total_cost);
