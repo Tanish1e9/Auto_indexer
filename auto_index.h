@@ -2,11 +2,12 @@
 #define AUTO_INDEX_H
 
 #include "postgres.h"
+#include "uthash.h"
+
 #include "postmaster/interrupt.h"
 #include "storage/lwlock.h"
 #include "utils/json.h"
 #include "utils/jsonb.h"
-
 
 #include "nodes/execnodes.h"
 #include "nodes/plannodes.h"
@@ -40,6 +41,9 @@
 /* StringInfo */
 #include "lib/stringinfo.h"
 #include "optimizer/planner.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 extern planner_hook_type prev_planner_hook;
 
@@ -51,5 +55,6 @@ void start_auto_index_worker(void);
 PG_FUNCTION_INFO_V1(auto_index_force_init);
 PG_FUNCTION_INFO_V1(auto_index_cleanup);
 PG_FUNCTION_INFO_V1(my_index_creator);
+
 
 #endif

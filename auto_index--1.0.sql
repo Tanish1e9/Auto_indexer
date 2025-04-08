@@ -10,7 +10,7 @@ CREATE EVENT TRIGGER auto_index_cleanup_tri ON sql_drop
     WHEN TAG IN ('DROP EXTENSION')
     EXECUTE FUNCTION auto_index_cleanup();
 
-CREATE FUNCTION my_index_creator() RETURNS void
+CREATE FUNCTION my_index_creator(text,text) RETURNS void
     AS 'auto_index', 'my_index_creator'
     LANGUAGE C VOLATILE;
 
@@ -19,11 +19,11 @@ ALTER EXTENSION auto_index DROP FUNCTION auto_index_cleanup();
 
 select auto_index_force_init();
 
-CREATE TABLE IF NOT EXISTS aidx_queries (
-    tablename TEXT,
-    colname TEXT,
-    cost FLOAT,
-    benefit FLOAT,
-    num_queries INT,
-    PRIMARY KEY (tablename, colname)
-);
+-- CREATE TABLE IF NOT EXISTS aidx_queries (
+--     tablename TEXT,
+--     colname TEXT,
+--     cost FLOAT,
+--     benefit FLOAT,
+--     num_queries INT,
+--     PRIMARY KEY (tablename, colname)
+-- );

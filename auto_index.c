@@ -4,166 +4,120 @@ PG_MODULE_MAGIC;
 
 planner_hook_type prev_planner_hook = NULL;
 
+char *table_name_glob = 0;
+char *col_name_glob = 0;
 static void handle_sigterm(int signum){proc_exit(1);}
 
-double extract_total_cost_from_json(const char *json)
-{
-    Jsonb *jb;
-    JsonbIterator *it;
-    JsonbValue v;
-    JsonbValue key;
-    JsonbValue val;
-    double total_cost = -1.0;
 
-    // Convert string to Jsonb
-    Datum json_datum = DirectFunctionCall1(jsonb_in, CStringGetDatum(json));
-    jb = DatumGetJsonbP(json_datum);
+// Your custom struct
+typedef struct {
+    int num_queries;
+    double benefit;
+    double cost;
+    int is_indexed;
+} MyStruct;
 
-    it = JsonbIteratorInit(&jb->root);
+// Inner map: key -> MyStruct
+typedef struct InnerMapEntry {
+    char key[64];
+    MyStruct data;
+    UT_hash_handle hh;
+} InnerMapEntry;
 
-    JsonbIteratorToken r;
-    bool in_plan = false;
+// Outer map: key -> InnerMapEntry*
+typedef struct OuterMapEntry {
+    char key[64];
+    InnerMapEntry *inner_map; // nested map
+    UT_hash_handle hh;
+} OuterMapEntry;
 
-    while ((r = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
-    {
-        if (r == WJB_KEY)
-        {
-            if (v.type == jbvString && strcmp(v.val.string.val, "Plan") == 0)
-            {
-                in_plan = true;
-            }
-            else if (in_plan && v.type == jbvString && strcmp(v.val.string.val, "Total Cost") == 0)
-            {
-                // Next value will be the actual cost
-                r = JsonbIteratorNext(&it, &val, true);
-                if (val.type == jbvNumeric)
-                {
-                    total_cost = DatumGetFloat8(DirectFunctionCall1(numeric_float8, NumericGetDatum(val.val.numeric)));
-                    break;
-                }
-            }
+OuterMapEntry *outer_map = NULL;
+
+// Add or update entry
+void add_entry(const char *outer_key, const char *inner_key, MyStruct value) {
+    OuterMapEntry *outer;
+    HASH_FIND_STR(outer_map, outer_key, outer);
+    if (!outer) {
+        outer = malloc(sizeof(OuterMapEntry));
+        strcpy(outer->key, outer_key);
+        outer->inner_map = NULL;
+        HASH_ADD_STR(outer_map, key, outer);
+    }
+
+    InnerMapEntry *inner;
+    HASH_FIND_STR(outer->inner_map, inner_key, inner);
+    if (!inner) {
+        inner = malloc(sizeof(InnerMapEntry));
+        strcpy(inner->key, inner_key);
+        HASH_ADD_STR(outer->inner_map, key, inner);
+    }
+
+    inner->data = value;
+}
+
+// Get entry
+MyStruct *get_entry(const char *outer_key, const char *inner_key) {
+    OuterMapEntry *outer;
+    HASH_FIND_STR(outer_map, outer_key, outer);
+    if (!outer) return NULL;
+
+    InnerMapEntry *inner;
+    HASH_FIND_STR(outer->inner_map, inner_key, inner);
+    return inner ? &inner->data : NULL;
+}
+
+// Clean up
+void free_all() {
+    OuterMapEntry *outer_entry, *outer_tmp;
+    HASH_ITER(hh, outer_map, outer_entry, outer_tmp) {
+        InnerMapEntry *inner_entry, *inner_tmp;
+        HASH_ITER(hh, outer_entry->inner_map, inner_entry, inner_tmp) {
+            HASH_DEL(outer_entry->inner_map, inner_entry);
+            free(inner_entry);
         }
+        HASH_DEL(outer_map, outer_entry);
+        free(outer_entry);
     }
-
-    return total_cost;
 }
 
 
+void delete_entry(const char *outer_key, const char *inner_key) {
+    OuterMapEntry *outer;
+    HASH_FIND_STR(outer_map, outer_key, outer);
+    if (!outer) return;
 
-double estimate_index_creation_cost(const char *table, const char *column)
-{
-    StringInfoData query;
-    SPI_connect();
-    initStringInfo(&query);
-
-    appendStringInfo(&query,
-        "EXPLAIN (FORMAT JSON) CREATE INDEX idx_temp_%s_%s ON %s(%s);",
-        table, column, table, column);
-
-    int ret = SPI_execute(query.data, true, 0);
-    if (ret != SPI_OK_SELECT || SPI_processed == 0)
-    {
-        elog(WARNING, "Failed to EXPLAIN CREATE INDEX");
-        SPI_finish();
-        return -1.0;
+    InnerMapEntry *inner;
+    HASH_FIND_STR(outer->inner_map, inner_key, inner);
+    if (inner) {
+        HASH_DEL(outer->inner_map, inner);
+        free(inner);
     }
 
-    char *json_str = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-                                                       SPI_tuptable->tupdesc,
-                                                       1,
-                                                       NULL));
-
-    double cost = extract_total_cost_from_json(json_str);
-
-    SPI_finish();
-    return cost;
-}
-
-double estimate_index_benefit(const char *table, const char *column, const char *value)
-{
-    StringInfoData base_query, index_query;
-    SPI_connect();
-
-    initStringInfo(&base_query);
-    initStringInfo(&index_query);
-
-    appendStringInfo(&base_query,
-        "EXPLAIN (FORMAT JSON) SELECT * FROM %s WHERE %s = '%s';",
-        table, column, value);
-
-    appendStringInfo(&index_query,
-        "SET enable_seqscan = OFF;");
-
-    // Get plan cost *with* index
-    SPI_execute(index_query.data, false, 0);
-    int ret = SPI_execute(base_query.data, true, 0);
-    if (ret != SPI_OK_SELECT || SPI_processed == 0)
-    {
-        elog(WARNING, "Failed to EXPLAIN SELECT with index");
-        SPI_finish();
-        return -1.0;
+    // If inner_map is now empty, delete outer entry too
+    if (outer->inner_map == NULL) {
+        HASH_DEL(outer_map, outer);
+        free(outer);
     }
-
-    char *json_str_index = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-                                                             SPI_tuptable->tupdesc,
-                                                             1,
-                                                             NULL));
-    double cost_with_index = extract_total_cost_from_json(json_str_index);
-
-    // Re-enable seqscan
-    SPI_execute("SET enable_seqscan = ON;", false, 0);
-
-    // Get plan cost *without* index
-    SPI_execute(base_query.data, true, 0);
-    char *json_str_seq = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-                                                           SPI_tuptable->tupdesc,
-                                                           1,
-                                                           NULL));
-    double cost_without_index = extract_total_cost_from_json(json_str_seq);
-
-    SPI_finish();
-
-    double benefit = cost_without_index - cost_with_index;
-    return benefit > 0 ? benefit : 0.0;
 }
 
-
-
-static List *extract_columns_from_expr(Node *node, List *rtable)
+static List *
+extract_columns_from_expr(Node *node, List *rtable)
 {
     List *colnames = NIL;
 
     if (node == NULL)
-        return colnames;
+        return NIL;
 
     if (IsA(node, Var))
     {
         Var *var = (Var *) node;
-
         if (var->varno > 0 && var->varno <= list_length(rtable))
         {
             RangeTblEntry *rte = list_nth_node(RangeTblEntry, rtable, var->varno - 1);
             if (rte->rtekind == RTE_RELATION)
             {
                 const char *colname = get_attname(rte->relid, var->varattno, false);
-                const char *tablename = get_rel_name(rte->relid);
-
-                elog(LOG, "Referenced column: %s.%s", tablename, colname);
-
-                // Avoid duplicates
-                bool found = false;
-                ListCell *lc;
-                foreach(lc, colnames)
-                {
-                    if (strcmp(colname, (char *) lfirst(lc)) == 0)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (!found)
-                    colnames = lappend(colnames, pstrdup(colname));
+                colnames = lappend(colnames, pstrdup(colname));
             }
         }
     }
@@ -173,8 +127,7 @@ static List *extract_columns_from_expr(Node *node, List *rtable)
         ListCell *lc;
         foreach(lc, op->args)
         {
-            List *subcols = extract_columns_from_expr((Node *) lfirst(lc), rtable);
-            colnames = list_concat_unique(colnames, subcols);
+            colnames = list_concat(colnames, extract_columns_from_expr((Node *) lfirst(lc), rtable));
         }
     }
     else if (IsA(node, BoolExpr))
@@ -183,19 +136,20 @@ static List *extract_columns_from_expr(Node *node, List *rtable)
         ListCell *lc;
         foreach(lc, b->args)
         {
-            List *subcols = extract_columns_from_expr((Node *) lfirst(lc), rtable);
-            colnames = list_concat_unique(colnames, subcols);
+            colnames = list_concat(colnames, extract_columns_from_expr((Node *) lfirst(lc), rtable));
         }
     }
     else if (IsA(node, RelabelType))
     {
-        RelabelType *relab = (RelabelType *) node;
-        List *subcols = extract_columns_from_expr((Node *) relab->arg, rtable);
-        colnames = list_concat_unique(colnames, subcols);
+        RelabelType *r = (RelabelType *) node;
+        colnames = list_concat(colnames, extract_columns_from_expr((Node *) r->arg, rtable));
     }
+
+    // Add more cases here as needed (e.g., ScalarArrayOpExpr, NullTest, etc.)
 
     return colnames;
 }
+
 
 static void find_seqscans(Plan *plan, List *rtable)
 {
@@ -220,21 +174,32 @@ static void find_seqscans(Plan *plan, List *rtable)
             {
                 Node *qual_node = (Node *) lfirst(lc);
                 List *colnames = extract_columns_from_expr(qual_node, rtable);
+                ListCell *cell;
+                foreach(cell, colnames)
+                {
+                    char *colname = (char *) lfirst(cell);
+                    elog(LOG, "Column used in WHERE clause: %s", colname);
 
-                // ListCell *cell;
-                // foreach(cell, colnames)
-                // {
-                //     char *colname = (char *) lfirst(cell);
-
-                //     // Use a representative value for estimation
-                //     const char *sample_value = "123";  // You could make this smarter
-
-                //     double creation_cost = estimate_index_creation_cost(table_name, colname);
-                //     double benefit = estimate_index_benefit(table_name, colname, sample_value);
-
-                //     elog(LOG, "Column: %s | Index Creation Cost: %.2f | Benefit: %.2f",
-                //          colname, creation_cost, benefit);
-                // }
+                    MyStruct *entry = get_entry(table_name, colname);
+                    if(entry){
+                        elog(LOG, "Entry found for %s,%s", table_name, colname);
+                        if(entry->is_indexed == 0){   
+                            entry->num_queries++;
+                            if(entry->benefit * entry->num_queries > entry->cost){
+                                entry->is_indexed = 1;
+                                strcpy(table_name_glob, table_name);
+                                strcpy(col_name_glob, colname);
+                                elog(LOG, "Creating index on %s,%s", table_name_glob, col_name_glob);
+                                start_auto_index_worker();
+                            }
+                        }
+                    }
+                    else{
+                        // num_queries,benefit,cost,is_indexed
+                        MyStruct new_entry = {1, 40, 120, 0};
+                        add_entry(table_name, colname, new_entry);
+                    }
+                }
             }
         }
     }
@@ -245,8 +210,13 @@ static void find_seqscans(Plan *plan, List *rtable)
 }
 
 PGDLLEXPORT void
-auto_index_worker_main(Datum main_arg)
-{
+auto_index_worker_main(Datum main_arg){
+    const char *input = MyBgworkerEntry->bgw_extra;
+
+    char table_name[64], column_name[64];
+    sscanf(input, "%63[^|]|%63s", table_name, column_name);
+
+
 	BackgroundWorkerInitializeConnection("postgres", NULL , 0);
     elog(LOG, "WORKER CHAL RHA H !!!!");
 
@@ -262,7 +232,12 @@ auto_index_worker_main(Datum main_arg)
         proc_exit(1);
     }
 
-	int ret = SPI_execute("select my_index_creator('stud','id');", true, 0);
+    StringInfoData query;
+    initStringInfo(&query);
+    appendStringInfo(&query,
+        "select my_index_creator('%s','%s');", table_name, column_name);
+
+    int ret = SPI_execute(query.data, true, 0);
 	if(ret != SPI_OK_SELECT){
 		elog(WARNING, "AutoIndexWorker: SPI_exec failed for SELECT");
 		SPI_finish();
@@ -309,6 +284,9 @@ void start_auto_index_worker(void) {
     snprintf(worker.bgw_name, BGW_MAXLEN, "AutoIndex Worker");
     sprintf(worker.bgw_library_name, "auto_index");
     sprintf(worker.bgw_function_name, "auto_index_worker_main");
+
+    // Setup bgw_extra
+    snprintf(worker.bgw_extra, BGW_EXTRALEN, "%s|%s", table_name_glob, col_name_glob);
     worker.bgw_notify_pid = MyProcPid;
 
     /* Start the worker process */
@@ -334,6 +312,9 @@ auto_index_force_init(PG_FUNCTION_ARGS)
 		prev_planner_hook = planner_hook;
 		planner_hook = auto_index_planner_hook;
 	}
+
+    table_name_glob = (char*)(malloc (100 * sizeof(char)));
+    col_name_glob = (char*)(malloc (100 * sizeof(char)));
     PG_RETURN_VOID();
 }
 
@@ -363,12 +344,20 @@ auto_index_cleanup(PG_FUNCTION_ARGS)
 Datum
 my_index_creator(PG_FUNCTION_ARGS)
 {
-    text *table_text = PG_GETARG_TEXT_P(0);
-    text *column_text = PG_GETARG_TEXT_P(1);
-
+    // Get the first argument (table name)
+    text *table_text = PG_GETARG_TEXT_PP(0);
     char *table_name = text_to_cstring(table_text);
-    char *col_name = text_to_cstring(column_text);
 
+    // Get the second argument (column name)
+    text *col_text = PG_GETARG_TEXT_PP(1);
+    char *col_name = text_to_cstring(col_text);
+
+    if(table_name == NULL || col_name == NULL){
+        elog(ERROR, "Table or column name is NULL");
+        proc_exit(1);
+    }
+    elog(LOG, "NAHI ANA CHAHYE");
+    elog(LOG, "Creating index on %s.%s", table_name, col_name);
     StringInfoData query;
     initStringInfo(&query);
     appendStringInfo(&query,
