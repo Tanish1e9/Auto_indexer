@@ -149,7 +149,7 @@ extract_columns_from_expr(Node *node, List *rtable)
     return colnames;
 }
 
-void my_debug_index_info(const char *relname)
+void my_index_info(const char *relname)
 {
     Oid relid;
     Relation rel;
@@ -259,7 +259,7 @@ static void find_seqscans(Plan *plan, List *rtable)
         elog(LOG, "SeqScan cost: %.2f", plan->startup_cost + plan->total_cost);
 
         MyStruct* en = get_entry(table_name, NULL);
-        if(!en) my_debug_index_info(table_name);
+        if(!en) my_index_info(table_name);
     
         if (plan->qual)
         {
@@ -288,6 +288,14 @@ static void find_seqscans(Plan *plan, List *rtable)
                     }
                     else{
                         // num_queries,benefit,cost,is_indexed
+                        double n = 0;
+                        HeapTuple classTuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+                        if (HeapTupleIsValid(classTuple)) {
+                            Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTuple);
+                            n = (double) classForm->reltuples;
+                            ReleaseSysCache(classTuple);
+                        }
+                        
                         MyStruct new_entry = {1, 40, 120, 0};
                         add_entry(table_name, colname, new_entry);
                     }
