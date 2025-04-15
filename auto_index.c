@@ -60,6 +60,7 @@ MyStruct *get_entry(const char *outer_key, const char *inner_key) {
     OuterMapEntry *outer;
     HASH_FIND_STR(outer_map, outer_key, outer);
     if (!outer) return NULL;
+    if(!inner_key) return outer;
 
     InnerMapEntry *inner;
     HASH_FIND_STR(outer->inner_map, inner_key, inner);
@@ -148,6 +149,76 @@ extract_columns_from_expr(Node *node, List *rtable)
     return colnames;
 }
 
+void my_debug_index_info(const char *relname)
+{
+    Oid relid;
+    Relation rel;
+    List *indexList;
+    ListCell *lc;
+    
+    // Step 1: Resolve table OID
+    relid = RelnameGetRelid(relname);
+    if (!OidIsValid(relid))
+    {
+        elog(LOG, "Relation %s not found", relname);
+        return;
+    }
+    
+    // Step 2: Open relation
+    rel = relation_open(relid, AccessShareLock);
+    if (rel == NULL)
+    {
+        elog(LOG, "Could not open relation %s", relname);
+        return;
+    }
+    
+    // Step 3: Get list of indexes
+    indexList = RelationGetIndexList(rel);
+    if (indexList == NIL)
+    {
+        elog(INFO, "Relation %s has no indexes", relname);
+        relation_close(rel, AccessShareLock);
+        return;
+    }
+    
+    foreach(lc, indexList)
+    {
+        Oid indexOid = lfirst_oid(lc);
+        Relation indexRel = index_open(indexOid, AccessShareLock);
+
+        if (indexRel->rd_index == NULL)
+        {
+            elog(INFO, "Skipping invalid index");
+            index_close(indexRel, AccessShareLock);
+            continue;
+        }
+
+        Form_pg_index indexForm = indexRel->rd_index;
+        int numIndexKeys = indexForm->indnatts;
+
+        for (int i = 0; i < numIndexKeys; i++)
+        {
+            AttrNumber attnum = indexForm->indkey.values[i];
+
+            if (attnum == 0)
+            {
+                elog(LOG, "  Column %d is an expression", i + 1);
+                continue;
+            }
+
+            const char *colname = get_attname(relid, attnum, false);
+            add_entry(relname, colname, (MyStruct){0, 0, 0, 1});
+            elog(LOG, " Index Column: %s", colname);
+        }
+
+        index_close(indexRel, AccessShareLock);
+    }
+
+    list_free(indexList);
+    relation_close(rel, AccessShareLock);
+}
+
+
 static void find_seqscans(Plan *plan, List *rtable)
 {
     if (plan == NULL)
@@ -187,6 +258,9 @@ static void find_seqscans(Plan *plan, List *rtable)
         elog(LOG, "SeqScan on table: %s", table_name);
         elog(LOG, "SeqScan cost: %.2f", plan->startup_cost + plan->total_cost);
 
+        MyStruct* en = get_entry(table_name, NULL);
+        if(!en) my_debug_index_info(table_name);
+    
         if (plan->qual)
         {
             ListCell *lc;
@@ -378,7 +452,7 @@ my_index_creator(PG_FUNCTION_ARGS)
     StringInfoData query;
     initStringInfo(&query);
     appendStringInfo(&query,
-        "CREATE INDEX IF NOT EXISTS idx_%s_%s ON %s (%s);",
+        "CREATE INDEX IF NOT EXISTS my_index_%s_%s ON %s (%s);",
         table_name, col_name, table_name, col_name);
 
     if (SPI_connect() != SPI_OK_CONNECT)

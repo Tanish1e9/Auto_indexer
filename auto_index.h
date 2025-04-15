@@ -3,6 +3,14 @@
 
 #include "postgres.h"
 #include "uthash.h"
+#include "access/htup_details.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_index.h"
+#include "catalog/namespace.h"
+#include "utils/relcache.h"
+#include "utils/typcache.h"
+#include "catalog/index.h"
+#include "access/heapam.h"
 #include "utils/syscache.h"
 
 #include "postmaster/interrupt.h"
