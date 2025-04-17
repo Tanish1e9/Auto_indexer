@@ -10,59 +10,46 @@ static void handle_sigterm(int signum){proc_exit(1);}
 static bool in_hook = false;
 bool auto_index_enabled = true;
 
-double compute_index_creation_cost(const char *table_name, const char *colname) {
-    Oid relid = RelnameGetRelid(table_name);
-    double n = 0;
+#include "catalog/pg_class.h"
+#include "utils/syscache.h"
+#include "utils/relcache.h"
+#include "utils/lsyscache.h"
+#include "utils/fmgroids.h"
+#include "utils/elog.h"
+#include "utils/builtins.h"
 
-    if (!OidIsValid(relid))
-        return 1000.0;  // default fallback
+void get_table_page_tuple_count(const char *table_name, int* page_count, int* tuple_count)
+{
+    Oid rel_oid;
+    HeapTuple tuple;
+    Form_pg_class classForm;
 
-    HeapTuple classTuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
-    if (HeapTupleIsValid(classTuple)) {
-        Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTuple);
-        n = (double) classForm->reltuples;
-        ReleaseSysCache(classTuple);
+    // Get OID of the relation (table)
+    rel_oid = RelnameGetRelid(table_name);
+
+    if (!OidIsValid(rel_oid))
+    {
+        elog(ERROR, "Invalid table name: %s", table_name);
+        return;
     }
 
-    if (n <= 0)
-        return 1000.0;  // fallback
+    // Fetch tuple from pg_class using syscache
+    tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rel_oid));
 
-    int fanout = 100;  // conservative default fanout
-    return n * log(n) / log(fanout);
-}
+    if (!HeapTupleIsValid(tuple))
+    {
+        elog(ERROR, "Could not find pg_class tuple for table: %s", table_name);
+        return;
+    }
 
-double compute_index_scan_benefit(Query *query, const char *table_name, const char *colname) {
-    PlannedStmt *seq_plan, *index_plan;
-    double seq_cost = 0.0, idx_cost = 0.0;
+    // Cast the tuple to Form_pg_class to access fields
+    classForm = (Form_pg_class) GETSTRUCT(tuple);
 
-    // Make a deep copy of the query for two different planner invocations
-    Query *query_seq = copyObject(query);
-    Query *query_idx = copyObject(query);
+    *page_count = classForm->relpages;
+    *tuple_count = classForm->reltuples;
 
-    // Force seqscan enabled and indexscan disabled for baseline
-    bool save_seqscan = enable_seqscan;
-    bool save_indexscan = enable_indexscan;
-
-    enable_seqscan = true;
-    enable_indexscan = false;
-    seq_plan = standard_planner(query_seq, NULL, 0, NULL);
-
-    if (seq_plan && seq_plan->planTree)
-        seq_cost = seq_plan->planTree->startup_cost + seq_plan->planTree->total_cost;
-
-    // Now force index scan (disable seqscan)
-    enable_seqscan = false;
-    enable_indexscan = true;
-    index_plan = standard_planner(query_idx, NULL, 0, NULL);
-
-    if (index_plan && index_plan->planTree)
-        idx_cost = index_plan->planTree->startup_cost + index_plan->planTree->total_cost;
-
-    // Restore global GUCs
-    enable_seqscan = save_seqscan;
-    enable_indexscan = save_indexscan;
-
-    return seq_cost - idx_cost;
+    // Release the syscache
+    ReleaseSysCache(tuple);
 }
 
 static List *
@@ -239,23 +226,22 @@ static void find_seqscans(Plan *plan, List *rtable)
                         "FROM aidx_queries WHERE tablename = '%s' AND colname = '%s'",
                         table_name, colname
                     );
-                    
                     int ret = SPI_connect();
                     if (ret != SPI_OK_CONNECT)
-                        elog(ERROR, "SPI_connect failed: error code %d", ret);
-
+                    elog(ERROR, "SPI_connect failed: error code %d", ret);
+                    
                     ret = SPI_execute(query, true, 0);  // read-only, unlimited rows
                     if (ret != SPI_OK_SELECT)
                         elog(ERROR, "SPI_execute failed: error code %d", ret);
-
-                    int proc = SPI_processed;
-                    elog(LOG, "Rows returned: %d", proc);
-
+                        
+                        int proc = SPI_processed;
+                        elog(LOG, "Rows returned: %d", proc);
+                        
                     if(proc == 1){
                         HeapTuple tuple = SPI_tuptable->vals[0];
                         TupleDesc tupdesc = SPI_tuptable->tupdesc;
                         bool isnull;
-
+                        
                         // Column 1: tablename (text)
                         Datum tablename_datum = SPI_getbinval(tuple, tupdesc, 1, &isnull);
                         char *tablename = isnull ? "<null>" : TextDatumGetCString(tablename_datum);
@@ -263,15 +249,15 @@ static void find_seqscans(Plan *plan, List *rtable)
                         // Column 2: colname (text)
                         Datum colname_datum = SPI_getbinval(tuple, tupdesc, 2, &isnull);
                         char *colname = isnull ? "<null>" : TextDatumGetCString(colname_datum);
-
+                        
                         // Column 3: cost (float8)
                         Datum cost_datum = SPI_getbinval(tuple, tupdesc, 3, &isnull);
                         double cost = isnull ? 0.0 : DatumGetFloat8(cost_datum);
-
+                        
                         // Column 4: benefit (float8)
                         Datum benefit_datum = SPI_getbinval(tuple, tupdesc, 4, &isnull);
                         double benefit = isnull ? 0.0 : DatumGetFloat8(benefit_datum);
-
+                        
                         // Column 5: num_queries (int)
                         Datum num_q_datum = SPI_getbinval(tuple, tupdesc, 5, &isnull);
                         int32 num_queries = isnull ? 0 : DatumGetInt32(num_q_datum);
@@ -284,7 +270,7 @@ static void find_seqscans(Plan *plan, List *rtable)
                         elog(LOG, "Row %d: table=%s, column=%s, cost=%.3f, benefit=%.3f, queries=%d, indexed=%s",
                             0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
 
-                        if(!is_indexed){
+                            if(!is_indexed){
                             if((num_queries+1) * benefit > cost){
                                 strcpy(table_name_glob, table_name);
                                 strcpy(col_name_glob, colname);
@@ -292,7 +278,7 @@ static void find_seqscans(Plan *plan, List *rtable)
                                 start_auto_index_worker();
                             }
                         }
-
+                        
                         if(is_indexed){
                             query = psprintf(
                                 "UPDATE aidx_queries SET num_queries = num_queries + 1, is_indexed = 't' WHERE tablename = '%s' AND colname = '%s'",
@@ -305,27 +291,29 @@ static void find_seqscans(Plan *plan, List *rtable)
                                 table_name, colname
                             );
                         }
-
+                        
                     } else if (proc == 0){
                         bool ans = my_index_info(table_name, colname);
-                        // double cost = compute_index_creation_cost(table_name, colname);
-                        // double benefit = compute_index_scan_benefit(query, table_name, colname);
+                        int page_count = 0, tuple_count = 0;
+                        get_table_page_tuple_count(table_name, &page_count, &tuple_count);
+                        double cost = tuple_count;
+                        int height = ceil(log(tuple_count)/log(100));
+                        double benefit = page_count - height;
                         if(!ans){
                             query = psprintf(
                                 "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 'f')",
-                                table_name, colname, 120.0, 40.0
+                                table_name, colname, cost, benefit
                             );
                         }
                         else{
                             query = psprintf(
                                 "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 't')",
-                                table_name, colname, 120.0, 40.0
+                                table_name, colname, cost, benefit
                             );
                         }
                     }
-                    // StartTransactionCommand();
+                    
                     SPI_execute(query, false, 0);
-                    // CommitTransactionCommand();
                     SPI_finish();
                 }
             }

@@ -2,7 +2,6 @@
 #define AUTO_INDEX_H
 
 #include "postgres.h"
-// #include "uthash.h"
 #include "access/htup_details.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
@@ -54,16 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "utils/guc.h"
-#include "optimizer/cost.h"
-#include "optimizer/pathnode.h"
-#include "optimizer/plancat.h"
-#include "optimizer/planner.h"
-#include "optimizer/planmain.h"
-#include "optimizer/paths.h"
-#include "optimizer/clauses.h"
-#include "optimizer/paramassign.h"
-#include "optimizer/prep.h"
-#include "optimizer/tlist.h"
+#include <math.h>
 
 extern planner_hook_type prev_planner_hook;
 

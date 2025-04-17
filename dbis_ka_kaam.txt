@@ -51,3 +51,8 @@ index_pages = index_entry_size * num_tuples / block_size
 index_creation_cost ≈ (seq_page_cost × table_pages) + (cpu_operator_cost × N × log2(N)) + (random_page_cost × index_pages)
 
 clause_selectivity and related functions can be used to calculate selectivity
+
+
+
+src/backend/executor/spi.c ----   line 220
+* SPI callers are *always* inside a transaction.
