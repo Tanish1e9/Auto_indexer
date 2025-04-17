@@ -441,7 +441,7 @@ void _PG_init(void)
         "Enable or disable automatic indexing logic",           // description
         NULL,                                                   // no short description
         &auto_index_enabled,                                    // pointer to the variable
-        false,                                                   // default value
+        true,                                                   // default value
         PGC_SIGHUP,                                              // can be set by superuser (can also use PGC_USERSET)
         0,                                                      // GUC flags
         NULL, NULL, NULL                                        // no hooks
