@@ -8,6 +8,7 @@ char *table_name_glob = 0;
 char *col_name_glob = 0;
 static void handle_sigterm(int signum){proc_exit(1);}
 static bool in_hook = false;
+bool auto_index_enabled = false;
 
 double compute_index_creation_cost(const char *table_name, const char *colname) {
     Oid relid = RelnameGetRelid(table_name);
@@ -29,7 +30,6 @@ double compute_index_creation_cost(const char *table_name, const char *colname) 
     int fanout = 100;  // conservative default fanout
     return n * log(n) / log(fanout);
 }
-
 
 double compute_index_scan_benefit(Query *query, const char *table_name, const char *colname) {
     PlannedStmt *seq_plan, *index_plan;
@@ -64,100 +64,6 @@ double compute_index_scan_benefit(Query *query, const char *table_name, const ch
 
     return seq_cost - idx_cost;
 }
-
-
-
-// // Your custom struct
-// typedef struct {
-//     int num_queries;
-//     double benefit;
-//     double cost;
-//     int is_indexed;
-// } MyStruct;
-
-// // Inner map: key -> MyStruct
-// typedef struct InnerMapEntry {
-//     char key[64];
-//     MyStruct data;
-//     UT_hash_handle hh;
-// } InnerMapEntry;
-
-// // Outer map: key -> InnerMapEntry*
-// typedef struct OuterMapEntry {
-//     char key[64];
-//     InnerMapEntry *inner_map; // nested map
-//     UT_hash_handle hh;
-// } OuterMapEntry;
-
-// OuterMapEntry *outer_map = NULL;
-
-// // Add or update entry
-// void add_entry(const char *outer_key, const char *inner_key, MyStruct value) {
-//     OuterMapEntry *outer;
-//     HASH_FIND_STR(outer_map, outer_key, outer);
-//     if (!outer) {
-//         outer = malloc(sizeof(OuterMapEntry));
-//         strcpy(outer->key, outer_key);
-//         outer->inner_map = NULL;
-//         HASH_ADD_STR(outer_map, key, outer);
-//     }
-
-//     InnerMapEntry *inner;
-//     HASH_FIND_STR(outer->inner_map, inner_key, inner);
-//     if (!inner) {
-//         inner = malloc(sizeof(InnerMapEntry));
-//         strcpy(inner->key, inner_key);
-//         HASH_ADD_STR(outer->inner_map, key, inner);
-//     }
-
-//     inner->data = value;
-// }
-
-// // Get entry
-// MyStruct *get_entry(const char *outer_key, const char *inner_key) {
-//     OuterMapEntry *outer;
-//     HASH_FIND_STR(outer_map, outer_key, outer);
-//     if (!outer) return NULL;
-//     if(!inner_key) return outer;
-
-//     InnerMapEntry *inner;
-//     HASH_FIND_STR(outer->inner_map, inner_key, inner);
-//     return inner ? &inner->data : NULL;
-// }
-
-// // Clean up
-// void free_all() {
-//     OuterMapEntry *outer_entry, *outer_tmp;
-//     HASH_ITER(hh, outer_map, outer_entry, outer_tmp) {
-//         InnerMapEntry *inner_entry, *inner_tmp;
-//         HASH_ITER(hh, outer_entry->inner_map, inner_entry, inner_tmp) {
-//             HASH_DEL(outer_entry->inner_map, inner_entry);
-//             free(inner_entry);
-//         }
-//         HASH_DEL(outer_map, outer_entry);
-//         free(outer_entry);
-//     }
-// }
-
-
-// void delete_entry(const char *outer_key, const char *inner_key) {
-//     OuterMapEntry *outer;
-//     HASH_FIND_STR(outer_map, outer_key, outer);
-//     if (!outer) return;
-
-//     InnerMapEntry *inner;
-//     HASH_FIND_STR(outer->inner_map, inner_key, inner);
-//     if (inner) {
-//         HASH_DEL(outer->inner_map, inner);
-//         free(inner);
-//     }
-
-//     // If inner_map is now empty, delete outer entry too
-//     if (outer->inner_map == NULL) {
-//         HASH_DEL(outer_map, outer);
-//         free(outer);
-//     }
-// }
 
 static List *
 extract_columns_from_expr(Node *node, List *rtable)
@@ -264,33 +170,15 @@ bool my_index_info(const char *relname, const char* target){
             }
 
             const char *colname = get_attname(relid, attnum, false);
-            // int ret = SPI_connect();
-            // const char *query = psprintf(
-            //     "SELECT tablename, colname, cost, benefit, num_queries, is_indexed "
-            //     "FROM aidx_queries WHERE tablename = '%s' AND colname = '%s'",
-            //     relname, colname
-            // );
-            // ret = SPI_execute(query, true, 0); 
-            // if(SPI_processed == 0){
-            //     const char* q = psprintf("insert into aidx_queries values('%s', '%s', %d, %d, %d, 't')",
-            //         relname, colname, 120, 40, 1
-            //     );
-            //     ret = SPI_execute(q, false, 0); 
-            // }
-            // add_entry(relname, colname, (MyStruct){0, 0, 0, 1});
-            // SPI_finish();
             elog(LOG, " Index Column: %s", colname);
             ans = (strcmp(colname,target)==0)?true:false;
         }
-
         index_close(indexRel, AccessShareLock);
     }
-
     list_free(indexList);
     relation_close(rel, AccessShareLock);
     return ans;
 }
-
 
 static void find_seqscans(Plan *plan, List *rtable)
 {
@@ -330,9 +218,6 @@ static void find_seqscans(Plan *plan, List *rtable)
 
         elog(LOG, "SeqScan on table: %s", table_name);
         elog(LOG, "SeqScan cost: %.2f", plan->startup_cost + plan->total_cost);
-
-        // MyStruct* en = get_entry(table_name, NULL);
-        // if(!en) my_index_info(table_name);
     
         if (plan->qual)
         {
@@ -394,17 +279,18 @@ static void find_seqscans(Plan *plan, List *rtable)
                         bool is_indexed = isnull ? false : DatumGetBool(indexed_datum);
 
                         // Log it
-                        // elog(INFO, "Row %d: table=%s, column=%s, cost=%.3f, benefit=%.3f, queries=%d, indexed=%s",
-                        //     0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
+                        elog(INFO, "Row %d: table=%s, column=%s, cost=%.3f, benefit=%.3f, queries=%d, indexed=%s",
+                            0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
 
                         if(!is_indexed){
-                            if(num_queries * benefit > cost){
+                            if((num_queries+1) * benefit > cost){
                                 strcpy(table_name_glob, table_name);
                                 strcpy(col_name_glob, colname);
                                 is_indexed = true;
                                 start_auto_index_worker();
                             }
                         }
+
                         if(is_indexed){
                             query = psprintf(
                                 "UPDATE aidx_queries SET num_queries = num_queries + 1, is_indexed = 't' WHERE tablename = '%s' AND colname = '%s'",
@@ -424,14 +310,14 @@ static void find_seqscans(Plan *plan, List *rtable)
                         // double benefit = compute_index_scan_benefit(query, table_name, colname);
                         if(!ans){
                             query = psprintf(
-                                "INSERT INTO aidx_queries values('%s', '%s', %g, %g, %d, 'f')",
-                                table_name, colname, 120, 40, 1
+                                "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 'f')",
+                                table_name, colname, 120.0, 40.0
                             );
                         }
                         else{
                             query = psprintf(
-                                "INSERT INTO aidx_queries values('%s', '%s', %g, %g, %d, 't')",
-                                table_name, colname, 120, 40, 1
+                                "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 't')",
+                                table_name, colname, 120.0, 40.0
                             );
                         }
                     }
@@ -439,32 +325,6 @@ static void find_seqscans(Plan *plan, List *rtable)
                     SPI_execute(query, false, 0);
                     // CommitTransactionCommand();
                     SPI_finish();
-
-                    // MyStruct *entry = get_entry(table_name, colname);
-                    // if(entry){
-                    //     entry->num_queries++;
-                    //     if(entry->is_indexed == 0){   
-                    //         if(entry->benefit * entry->num_queries > entry->cost){
-                    //             entry->is_indexed = 1;
-                    //             strcpy(table_name_glob, table_name);
-                    //             strcpy(col_name_glob, colname);
-                    //             start_auto_index_worker();
-                    //         }
-                    //     }
-                    // }
-                    // else{
-                    //     // num_queries,benefit,cost,is_indexed
-                    //     double n = 0;
-                    //     HeapTuple classTuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
-                    //     if (HeapTupleIsValid(classTuple)) {
-                    //         Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTuple);
-                    //         n = (double) classForm->reltuples;
-                    //         ReleaseSysCache(classTuple);
-                    //     }
-                        
-                    //     MyStruct new_entry = {1, 40, 120, 0};
-                    //     add_entry(table_name, colname, new_entry);
-                    // }
                 }
             }
         }
@@ -529,7 +389,7 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
                         prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
                         standard_planner(parse, query_string, cursorOptions, boundParams);
 
-	if (stmt && !in_hook){
+	if (stmt && !in_hook && auto_index_enabled){
         in_hook = true;
 		find_seqscans(stmt->planTree, stmt->rtable);
         in_hook = false;
@@ -556,13 +416,13 @@ void start_auto_index_worker(void) {
     snprintf(worker.bgw_extra, BGW_EXTRALEN, "%s|%s", table_name_glob, col_name_glob);
     worker.bgw_notify_pid = MyProcPid;
 
-    /* Start the worker process */
+    // Start the worker process 
     if (!RegisterDynamicBackgroundWorker(&worker, &handle)) {
         elog(WARNING, "Failed to start AutoIndex worker");
         return;
     }
 
-    /* Wait for worker to start */
+    // Wait for worker to start 
     status = WaitForBackgroundWorkerStartup(handle, &pid);
     if (status == BGWH_STARTED) {
         elog(LOG, "AutoIndex Worker started with PID: %d", pid);
@@ -574,6 +434,17 @@ void start_auto_index_worker(void) {
 void _PG_init(void)
 {
     elog(LOG, "PG init() was called at PID: %d", MyProcPid);
+    DefineCustomBoolVariable(
+        "auto_index.enable",                                    // name shown to user
+        "Enable or disable automatic indexing logic",           // description
+        NULL,                                                   // no short description
+        &auto_index_enabled,                                    // pointer to the variable
+        false,                                                   // default value
+        PGC_SUSET,                                              // can be set by superuser (can also use PGC_USERSET)
+        0,                                                      // GUC flags
+        NULL, NULL, NULL                                        // no hooks
+    );
+
 	if (planner_hook != auto_index_planner_hook){
 		prev_planner_hook = planner_hook;
 		planner_hook = auto_index_planner_hook;
@@ -583,25 +454,28 @@ void _PG_init(void)
     col_name_glob = (char*)(malloc (64 * sizeof(char)));
 }
 
-// Datum
-// auto_index_force_init(PG_FUNCTION_ARGS)
-// {
-//     elog(LOG, "auto_index_force_init() was called!");
-// 	if (planner_hook != auto_index_planner_hook){
-// 		prev_planner_hook = planner_hook;
-// 		planner_hook = auto_index_planner_hook;
-// 	}
+Datum
+auto_index_force_init(PG_FUNCTION_ARGS)
+{
+    elog(LOG, "auto_index_force_init() was called!");
+    auto_index_enabled = true;
+    // if(auto_index_enabled) return;
+	// if (planner_hook != auto_index_planner_hook){
+	// 	prev_planner_hook = planner_hook;
+	// 	planner_hook = auto_index_planner_hook;
+	// }
 
-//     table_name_glob = (char*)(malloc (64 * sizeof(char)));
-//     col_name_glob = (char*)(malloc (64 * sizeof(char)));
-//     PG_RETURN_VOID();
-// }
+    // table_name_glob = (char*)(malloc (64 * sizeof(char)));
+    // col_name_glob = (char*)(malloc (64 * sizeof(char)));
+    PG_RETURN_VOID();
+}
 
 Datum
 auto_index_cleanup(PG_FUNCTION_ARGS)
 {
     elog(LOG, "AutoIndex: Cleaning up and restoring original planner hook");
 
+    auto_index_enabled = false;
     if (planner_hook == auto_index_planner_hook)
         planner_hook = prev_planner_hook;
 

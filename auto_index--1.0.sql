@@ -1,6 +1,6 @@
--- CREATE FUNCTION auto_index_force_init() RETURNS void
---     AS 'MODULE_PATHNAME', 'auto_index_force_init'
---     LANGUAGE C STRICT;
+CREATE FUNCTION auto_index_force_init() RETURNS void
+    AS 'MODULE_PATHNAME', 'auto_index_force_init'
+    LANGUAGE C STRICT;
 
 CREATE FUNCTION auto_index_cleanup() RETURNS event_trigger
     AS 'MODULE_PATHNAME', 'auto_index_cleanup'
@@ -17,7 +17,7 @@ CREATE FUNCTION my_index_creator(text,text) RETURNS void
 ALTER EXTENSION auto_index DROP EVENT TRIGGER auto_index_cleanup_tri;
 ALTER EXTENSION auto_index DROP FUNCTION auto_index_cleanup();
 
--- select auto_index_force_init();
+select auto_index_force_init();
 
 CREATE TABLE IF NOT EXISTS aidx_queries (
     tablename TEXT,
