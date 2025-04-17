@@ -172,8 +172,10 @@ bool my_index_info(const char *relname, const char* target){
             const char *colname = get_attname(relid, attnum, false);
             elog(LOG, " Index Column: %s", colname);
             ans = (strcmp(colname,target)==0)?true:false;
+            if(ans) break;
         }
         index_close(indexRel, AccessShareLock);
+        if(ans) break;
     }
     list_free(indexList);
     relation_close(rel, AccessShareLock);
@@ -279,7 +281,7 @@ static void find_seqscans(Plan *plan, List *rtable)
                         bool is_indexed = isnull ? false : DatumGetBool(indexed_datum);
 
                         // Log it
-                        elog(INFO, "Row %d: table=%s, column=%s, cost=%.3f, benefit=%.3f, queries=%d, indexed=%s",
+                        elog(LOG, "Row %d: table=%s, column=%s, cost=%.3f, benefit=%.3f, queries=%d, indexed=%s",
                             0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
 
                         if(!is_indexed){
@@ -440,7 +442,7 @@ void _PG_init(void)
         NULL,                                                   // no short description
         &auto_index_enabled,                                    // pointer to the variable
         false,                                                   // default value
-        PGC_SUSET,                                              // can be set by superuser (can also use PGC_USERSET)
+        PGC_SIGHUP,                                              // can be set by superuser (can also use PGC_USERSET)
         0,                                                      // GUC flags
         NULL, NULL, NULL                                        // no hooks
     );
