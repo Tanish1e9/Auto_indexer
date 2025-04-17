@@ -2,6 +2,7 @@
 #define AUTO_INDEX_H
 
 #include "postgres.h"
+#include "utils/fmgroids.h"
 #include "access/htup_details.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"

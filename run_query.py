@@ -1,7 +1,8 @@
 import psycopg2
 from psycopg2 import OperationalError
+import threading
 
-def create_connection():
+def run_query(thread_id):
     try:
         conn = psycopg2.connect(
             dbname="postgres",
@@ -10,34 +11,36 @@ def create_connection():
             host="localhost",
             port="5433"
         )
-        print("✅ Connection to PostgreSQL successful")
-        return conn
-    except OperationalError as e:
-        print("❌ Failed to connect to PostgreSQL")
-        print("Error:", e)
-        return None
+        print(f"[Thread {thread_id}] ✅ Connected to PostgreSQL")
 
-def run_query():
-    conn = create_connection()
-    if conn is None:
-        return
-
-    try:
         cur = conn.cursor()
         for _ in range(10):
-            query = "SELECT * FROM advisor where i_id = '123';"
+            query = "SELECT * FROM advisor WHERE i_id = '123';"
             cur.execute(query)
-            conn.commit()
             rows = cur.fetchall()
-            for row in rows:
-                print(row)
-
+            print(f"[Thread {thread_id}] Got {len(rows)} rows")
+            conn.commit()
         cur.close()
-    except Exception as e:
-        print("❌ Error executing query:", e)
-    finally:
         conn.close()
-        print("🔒 Connection closed")
+        print(f"[Thread {thread_id}] 🔒 Connection closed")
+
+    except OperationalError as e:
+        print(f"[Thread {thread_id}] ❌ Failed to connect")
+        print("Error:", e)
+    except Exception as e:
+        print(f"[Thread {thread_id}] ❌ Query failed:", e)
+
+def main():
+    threads = []
+    num_threads = 5  # You can increase this if needed
+
+    for i in range(num_threads):
+        thread = threading.Thread(target=run_query, args=(i,))
+        thread.start()
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
 
 if __name__ == "__main__":
-    run_query()
+    main()

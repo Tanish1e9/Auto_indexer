@@ -9,14 +9,8 @@ char *col_name_glob = 0;
 static void handle_sigterm(int signum){proc_exit(1);}
 static bool in_hook = false;
 bool auto_index_enabled = true;
+static LWLock *MyIndexHashLock = NULL;
 
-#include "catalog/pg_class.h"
-#include "utils/syscache.h"
-#include "utils/relcache.h"
-#include "utils/lsyscache.h"
-#include "utils/fmgroids.h"
-#include "utils/elog.h"
-#include "utils/builtins.h"
 
 void get_table_page_tuple_count(const char *table_name, int* page_count, int* tuple_count)
 {
