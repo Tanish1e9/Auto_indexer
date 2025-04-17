@@ -277,9 +277,9 @@ static void find_seqscans(Plan *plan, List *rtable)
                         int32 num_queries = isnull ? 0 : DatumGetInt32(num_q_datum);
 
                         // Column 6: is_indexed (bool)
-                        Datum indexed_datum = SPI_getbinval(tuple, tupdesc, 6, &isnull);
-                        bool is_indexed = isnull ? false : DatumGetBool(indexed_datum);
-
+                        // Datum indexed_datum = SPI_getbinval(tuple, tupdesc, 6, &isnull);
+                        // bool is_indexed = isnull ? false : DatumGetBool(indexed_datum);
+                        bool is_indexed = my_index_info(table_name, colname);
                         // Log it
                         elog(LOG, "Row %d: table=%s, column=%s, cost=%.3f, benefit=%.3f, queries=%d, indexed=%s",
                             0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
@@ -301,7 +301,7 @@ static void find_seqscans(Plan *plan, List *rtable)
                         }
                         else{
                             query = psprintf(
-                                "UPDATE aidx_queries SET num_queries = num_queries + 1 WHERE tablename = '%s' AND colname = '%s'",
+                                "UPDATE aidx_queries SET num_queries = num_queries + 1, is_indexed = 'f' WHERE tablename = '%s' AND colname = '%s'",
                                 table_name, colname
                             );
                         }
