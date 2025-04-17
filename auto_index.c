@@ -7,99 +7,157 @@ planner_hook_type prev_planner_hook = NULL;
 char *table_name_glob = 0;
 char *col_name_glob = 0;
 static void handle_sigterm(int signum){proc_exit(1);}
+static bool in_hook = false;
 
+double compute_index_creation_cost(const char *table_name, const char *colname) {
+    Oid relid = RelnameGetRelid(table_name);
+    double n = 0;
 
-// Your custom struct
-typedef struct {
-    int num_queries;
-    double benefit;
-    double cost;
-    int is_indexed;
-} MyStruct;
+    if (!OidIsValid(relid))
+        return 1000.0;  // default fallback
 
-// Inner map: key -> MyStruct
-typedef struct InnerMapEntry {
-    char key[64];
-    MyStruct data;
-    UT_hash_handle hh;
-} InnerMapEntry;
-
-// Outer map: key -> InnerMapEntry*
-typedef struct OuterMapEntry {
-    char key[64];
-    InnerMapEntry *inner_map; // nested map
-    UT_hash_handle hh;
-} OuterMapEntry;
-
-OuterMapEntry *outer_map = NULL;
-
-// Add or update entry
-void add_entry(const char *outer_key, const char *inner_key, MyStruct value) {
-    OuterMapEntry *outer;
-    HASH_FIND_STR(outer_map, outer_key, outer);
-    if (!outer) {
-        outer = malloc(sizeof(OuterMapEntry));
-        strcpy(outer->key, outer_key);
-        outer->inner_map = NULL;
-        HASH_ADD_STR(outer_map, key, outer);
+    HeapTuple classTuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+    if (HeapTupleIsValid(classTuple)) {
+        Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTuple);
+        n = (double) classForm->reltuples;
+        ReleaseSysCache(classTuple);
     }
 
-    InnerMapEntry *inner;
-    HASH_FIND_STR(outer->inner_map, inner_key, inner);
-    if (!inner) {
-        inner = malloc(sizeof(InnerMapEntry));
-        strcpy(inner->key, inner_key);
-        HASH_ADD_STR(outer->inner_map, key, inner);
-    }
+    if (n <= 0)
+        return 1000.0;  // fallback
 
-    inner->data = value;
-}
-
-// Get entry
-MyStruct *get_entry(const char *outer_key, const char *inner_key) {
-    OuterMapEntry *outer;
-    HASH_FIND_STR(outer_map, outer_key, outer);
-    if (!outer) return NULL;
-    if(!inner_key) return outer;
-
-    InnerMapEntry *inner;
-    HASH_FIND_STR(outer->inner_map, inner_key, inner);
-    return inner ? &inner->data : NULL;
-}
-
-// Clean up
-void free_all() {
-    OuterMapEntry *outer_entry, *outer_tmp;
-    HASH_ITER(hh, outer_map, outer_entry, outer_tmp) {
-        InnerMapEntry *inner_entry, *inner_tmp;
-        HASH_ITER(hh, outer_entry->inner_map, inner_entry, inner_tmp) {
-            HASH_DEL(outer_entry->inner_map, inner_entry);
-            free(inner_entry);
-        }
-        HASH_DEL(outer_map, outer_entry);
-        free(outer_entry);
-    }
+    int fanout = 100;  // conservative default fanout
+    return n * log(n) / log(fanout);
 }
 
 
-void delete_entry(const char *outer_key, const char *inner_key) {
-    OuterMapEntry *outer;
-    HASH_FIND_STR(outer_map, outer_key, outer);
-    if (!outer) return;
+double compute_index_scan_benefit(Query *query, const char *table_name, const char *colname) {
+    PlannedStmt *seq_plan, *index_plan;
+    double seq_cost = 0.0, idx_cost = 0.0;
 
-    InnerMapEntry *inner;
-    HASH_FIND_STR(outer->inner_map, inner_key, inner);
-    if (inner) {
-        HASH_DEL(outer->inner_map, inner);
-        free(inner);
-    }
+    // Make a deep copy of the query for two different planner invocations
+    Query *query_seq = copyObject(query);
+    Query *query_idx = copyObject(query);
 
-    // If inner_map is now empty, delete outer entry too
-    if (outer->inner_map == NULL) {
-        HASH_DEL(outer_map, outer);
-        free(outer);
-    }
+    // Force seqscan enabled and indexscan disabled for baseline
+    bool save_seqscan = enable_seqscan;
+    bool save_indexscan = enable_indexscan;
+
+    enable_seqscan = true;
+    enable_indexscan = false;
+    seq_plan = standard_planner(query_seq, NULL, 0, NULL);
+
+    if (seq_plan && seq_plan->planTree)
+        seq_cost = seq_plan->planTree->startup_cost + seq_plan->planTree->total_cost;
+
+    // Now force index scan (disable seqscan)
+    enable_seqscan = false;
+    enable_indexscan = true;
+    index_plan = standard_planner(query_idx, NULL, 0, NULL);
+
+    if (index_plan && index_plan->planTree)
+        idx_cost = index_plan->planTree->startup_cost + index_plan->planTree->total_cost;
+
+    // Restore global GUCs
+    enable_seqscan = save_seqscan;
+    enable_indexscan = save_indexscan;
+
+    return seq_cost - idx_cost;
 }
+
+
+
+// // Your custom struct
+// typedef struct {
+//     int num_queries;
+//     double benefit;
+//     double cost;
+//     int is_indexed;
+// } MyStruct;
+
+// // Inner map: key -> MyStruct
+// typedef struct InnerMapEntry {
+//     char key[64];
+//     MyStruct data;
+//     UT_hash_handle hh;
+// } InnerMapEntry;
+
+// // Outer map: key -> InnerMapEntry*
+// typedef struct OuterMapEntry {
+//     char key[64];
+//     InnerMapEntry *inner_map; // nested map
+//     UT_hash_handle hh;
+// } OuterMapEntry;
+
+// OuterMapEntry *outer_map = NULL;
+
+// // Add or update entry
+// void add_entry(const char *outer_key, const char *inner_key, MyStruct value) {
+//     OuterMapEntry *outer;
+//     HASH_FIND_STR(outer_map, outer_key, outer);
+//     if (!outer) {
+//         outer = malloc(sizeof(OuterMapEntry));
+//         strcpy(outer->key, outer_key);
+//         outer->inner_map = NULL;
+//         HASH_ADD_STR(outer_map, key, outer);
+//     }
+
+//     InnerMapEntry *inner;
+//     HASH_FIND_STR(outer->inner_map, inner_key, inner);
+//     if (!inner) {
+//         inner = malloc(sizeof(InnerMapEntry));
+//         strcpy(inner->key, inner_key);
+//         HASH_ADD_STR(outer->inner_map, key, inner);
+//     }
+
+//     inner->data = value;
+// }
+
+// // Get entry
+// MyStruct *get_entry(const char *outer_key, const char *inner_key) {
+//     OuterMapEntry *outer;
+//     HASH_FIND_STR(outer_map, outer_key, outer);
+//     if (!outer) return NULL;
+//     if(!inner_key) return outer;
+
+//     InnerMapEntry *inner;
+//     HASH_FIND_STR(outer->inner_map, inner_key, inner);
+//     return inner ? &inner->data : NULL;
+// }
+
+// // Clean up
+// void free_all() {
+//     OuterMapEntry *outer_entry, *outer_tmp;
+//     HASH_ITER(hh, outer_map, outer_entry, outer_tmp) {
+//         InnerMapEntry *inner_entry, *inner_tmp;
+//         HASH_ITER(hh, outer_entry->inner_map, inner_entry, inner_tmp) {
+//             HASH_DEL(outer_entry->inner_map, inner_entry);
+//             free(inner_entry);
+//         }
+//         HASH_DEL(outer_map, outer_entry);
+//         free(outer_entry);
+//     }
+// }
+
+
+// void delete_entry(const char *outer_key, const char *inner_key) {
+//     OuterMapEntry *outer;
+//     HASH_FIND_STR(outer_map, outer_key, outer);
+//     if (!outer) return;
+
+//     InnerMapEntry *inner;
+//     HASH_FIND_STR(outer->inner_map, inner_key, inner);
+//     if (inner) {
+//         HASH_DEL(outer->inner_map, inner);
+//         free(inner);
+//     }
+
+//     // If inner_map is now empty, delete outer entry too
+//     if (outer->inner_map == NULL) {
+//         HASH_DEL(outer_map, outer);
+//         free(outer);
+//     }
+// }
 
 static List *
 extract_columns_from_expr(Node *node, List *rtable)
@@ -149,8 +207,8 @@ extract_columns_from_expr(Node *node, List *rtable)
     return colnames;
 }
 
-void my_index_info(const char *relname)
-{
+bool my_index_info(const char *relname, const char* target){
+    bool ans = false;
     Oid relid;
     Relation rel;
     List *indexList;
@@ -196,8 +254,7 @@ void my_index_info(const char *relname)
         Form_pg_index indexForm = indexRel->rd_index;
         int numIndexKeys = indexForm->indnatts;
 
-        for (int i = 0; i < numIndexKeys; i++)
-        {
+        for (int i = 0; i < numIndexKeys; i++)        {
             AttrNumber attnum = indexForm->indkey.values[i];
 
             if (attnum == 0)
@@ -207,8 +264,23 @@ void my_index_info(const char *relname)
             }
 
             const char *colname = get_attname(relid, attnum, false);
-            add_entry(relname, colname, (MyStruct){0, 0, 0, 1});
+            // int ret = SPI_connect();
+            // const char *query = psprintf(
+            //     "SELECT tablename, colname, cost, benefit, num_queries, is_indexed "
+            //     "FROM aidx_queries WHERE tablename = '%s' AND colname = '%s'",
+            //     relname, colname
+            // );
+            // ret = SPI_execute(query, true, 0); 
+            // if(SPI_processed == 0){
+            //     const char* q = psprintf("insert into aidx_queries values('%s', '%s', %d, %d, %d, 't')",
+            //         relname, colname, 120, 40, 1
+            //     );
+            //     ret = SPI_execute(q, false, 0); 
+            // }
+            // add_entry(relname, colname, (MyStruct){0, 0, 0, 1});
+            // SPI_finish();
             elog(LOG, " Index Column: %s", colname);
+            ans = (strcmp(colname,target)==0)?true:false;
         }
 
         index_close(indexRel, AccessShareLock);
@@ -216,6 +288,7 @@ void my_index_info(const char *relname)
 
     list_free(indexList);
     relation_close(rel, AccessShareLock);
+    return ans;
 }
 
 
@@ -258,8 +331,8 @@ static void find_seqscans(Plan *plan, List *rtable)
         elog(LOG, "SeqScan on table: %s", table_name);
         elog(LOG, "SeqScan cost: %.2f", plan->startup_cost + plan->total_cost);
 
-        MyStruct* en = get_entry(table_name, NULL);
-        if(!en) my_index_info(table_name);
+        // MyStruct* en = get_entry(table_name, NULL);
+        // if(!en) my_index_info(table_name);
     
         if (plan->qual)
         {
@@ -274,31 +347,124 @@ static void find_seqscans(Plan *plan, List *rtable)
                     char *colname = (char *) lfirst(cell);
                     elog(LOG, "Column used in WHERE clause: %s", colname);
 
-                    MyStruct *entry = get_entry(table_name, colname);
-                    if(entry){
-                        entry->num_queries++;
-                        if(entry->is_indexed == 0){   
-                            if(entry->benefit * entry->num_queries > entry->cost){
-                                entry->is_indexed = 1;
+                    char *query = psprintf(
+                        "SELECT tablename, colname, cost, benefit, num_queries, is_indexed "
+                        "FROM aidx_queries WHERE tablename = '%s' AND colname = '%s'",
+                        table_name, colname
+                    );
+                    
+                    int ret = SPI_connect();
+                    if (ret != SPI_OK_CONNECT)
+                        elog(ERROR, "SPI_connect failed: error code %d", ret);
+
+                    ret = SPI_execute(query, true, 0);  // read-only, unlimited rows
+                    if (ret != SPI_OK_SELECT)
+                        elog(ERROR, "SPI_execute failed: error code %d", ret);
+
+                    int proc = SPI_processed;
+                    elog(LOG, "Rows returned: %d", proc);
+
+                    if(proc == 1){
+                        HeapTuple tuple = SPI_tuptable->vals[0];
+                        TupleDesc tupdesc = SPI_tuptable->tupdesc;
+                        bool isnull;
+
+                        // Column 1: tablename (text)
+                        Datum tablename_datum = SPI_getbinval(tuple, tupdesc, 1, &isnull);
+                        char *tablename = isnull ? "<null>" : TextDatumGetCString(tablename_datum);
+
+                        // Column 2: colname (text)
+                        Datum colname_datum = SPI_getbinval(tuple, tupdesc, 2, &isnull);
+                        char *colname = isnull ? "<null>" : TextDatumGetCString(colname_datum);
+
+                        // Column 3: cost (float8)
+                        Datum cost_datum = SPI_getbinval(tuple, tupdesc, 3, &isnull);
+                        double cost = isnull ? 0.0 : DatumGetFloat8(cost_datum);
+
+                        // Column 4: benefit (float8)
+                        Datum benefit_datum = SPI_getbinval(tuple, tupdesc, 4, &isnull);
+                        double benefit = isnull ? 0.0 : DatumGetFloat8(benefit_datum);
+
+                        // Column 5: num_queries (int)
+                        Datum num_q_datum = SPI_getbinval(tuple, tupdesc, 5, &isnull);
+                        int32 num_queries = isnull ? 0 : DatumGetInt32(num_q_datum);
+
+                        // Column 6: is_indexed (bool)
+                        Datum indexed_datum = SPI_getbinval(tuple, tupdesc, 6, &isnull);
+                        bool is_indexed = isnull ? false : DatumGetBool(indexed_datum);
+
+                        // Log it
+                        // elog(INFO, "Row %d: table=%s, column=%s, cost=%.3f, benefit=%.3f, queries=%d, indexed=%s",
+                        //     0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
+
+                        if(!is_indexed){
+                            if(num_queries * benefit > cost){
                                 strcpy(table_name_glob, table_name);
                                 strcpy(col_name_glob, colname);
+                                is_indexed = true;
                                 start_auto_index_worker();
                             }
                         }
-                    }
-                    else{
-                        // num_queries,benefit,cost,is_indexed
-                        double n = 0;
-                        HeapTuple classTuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
-                        if (HeapTupleIsValid(classTuple)) {
-                            Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTuple);
-                            n = (double) classForm->reltuples;
-                            ReleaseSysCache(classTuple);
+                        if(is_indexed){
+                            query = psprintf(
+                                "UPDATE aidx_queries SET num_queries = num_queries + 1, is_indexed = 't' WHERE tablename = '%s' AND colname = '%s'",
+                                table_name, colname
+                            );
                         }
-                        
-                        MyStruct new_entry = {1, 40, 120, 0};
-                        add_entry(table_name, colname, new_entry);
+                        else{
+                            query = psprintf(
+                                "UPDATE aidx_queries SET num_queries = num_queries + 1 WHERE tablename = '%s' AND colname = '%s'",
+                                table_name, colname
+                            );
+                        }
+
+                    } else if (proc == 0){
+                        bool ans = my_index_info(table_name, colname);
+                        // double cost = compute_index_creation_cost(table_name, colname);
+                        // double benefit = compute_index_scan_benefit(query, table_name, colname);
+                        if(!ans){
+                            query = psprintf(
+                                "INSERT INTO aidx_queries values('%s', '%s', %g, %g, %d, 'f')",
+                                table_name, colname, 120, 40, 1
+                            );
+                        }
+                        else{
+                            query = psprintf(
+                                "INSERT INTO aidx_queries values('%s', '%s', %g, %g, %d, 't')",
+                                table_name, colname, 120, 40, 1
+                            );
+                        }
                     }
+                    // StartTransactionCommand();
+                    SPI_execute(query, false, 0);
+                    // CommitTransactionCommand();
+                    SPI_finish();
+
+                    // MyStruct *entry = get_entry(table_name, colname);
+                    // if(entry){
+                    //     entry->num_queries++;
+                    //     if(entry->is_indexed == 0){   
+                    //         if(entry->benefit * entry->num_queries > entry->cost){
+                    //             entry->is_indexed = 1;
+                    //             strcpy(table_name_glob, table_name);
+                    //             strcpy(col_name_glob, colname);
+                    //             start_auto_index_worker();
+                    //         }
+                    //     }
+                    // }
+                    // else{
+                    //     // num_queries,benefit,cost,is_indexed
+                    //     double n = 0;
+                    //     HeapTuple classTuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+                    //     if (HeapTupleIsValid(classTuple)) {
+                    //         Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTuple);
+                    //         n = (double) classForm->reltuples;
+                    //         ReleaseSysCache(classTuple);
+                    //     }
+                        
+                    //     MyStruct new_entry = {1, 40, 120, 0};
+                    //     add_entry(table_name, colname, new_entry);
+                    // }
                 }
             }
         }
@@ -363,8 +529,10 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
                         prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
                         standard_planner(parse, query_string, cursorOptions, boundParams);
 
-	if (stmt){
+	if (stmt && !in_hook){
+        in_hook = true;
 		find_seqscans(stmt->planTree, stmt->rtable);
+        in_hook = false;
 	}
 
     return stmt;
@@ -403,10 +571,9 @@ void start_auto_index_worker(void) {
     }
 }
 
-Datum
-auto_index_force_init(PG_FUNCTION_ARGS)
+void _PG_init(void)
 {
-    elog(LOG, "auto_index_force_init() was called!");
+    elog(LOG, "PG init() was called at PID: %d", MyProcPid);
 	if (planner_hook != auto_index_planner_hook){
 		prev_planner_hook = planner_hook;
 		planner_hook = auto_index_planner_hook;
@@ -414,8 +581,21 @@ auto_index_force_init(PG_FUNCTION_ARGS)
 
     table_name_glob = (char*)(malloc (64 * sizeof(char)));
     col_name_glob = (char*)(malloc (64 * sizeof(char)));
-    PG_RETURN_VOID();
 }
+
+// Datum
+// auto_index_force_init(PG_FUNCTION_ARGS)
+// {
+//     elog(LOG, "auto_index_force_init() was called!");
+// 	if (planner_hook != auto_index_planner_hook){
+// 		prev_planner_hook = planner_hook;
+// 		planner_hook = auto_index_planner_hook;
+// 	}
+
+//     table_name_glob = (char*)(malloc (64 * sizeof(char)));
+//     col_name_glob = (char*)(malloc (64 * sizeof(char)));
+//     PG_RETURN_VOID();
+// }
 
 Datum
 auto_index_cleanup(PG_FUNCTION_ARGS)
@@ -435,7 +615,8 @@ auto_index_cleanup(PG_FUNCTION_ARGS)
 	SPI_execute("DROP FUNCTION IF EXISTS auto_index_cleanup();", false, 0);
 
 	SPI_finish();
-    free_all();
+    free(table_name_glob);
+    free(col_name_glob);
 
     PG_RETURN_VOID();
 }

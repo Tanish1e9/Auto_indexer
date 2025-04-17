@@ -2,7 +2,7 @@
 #define AUTO_INDEX_H
 
 #include "postgres.h"
-#include "uthash.h"
+// #include "uthash.h"
 #include "access/htup_details.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
@@ -53,6 +53,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "utils/guc.h"
+#include "optimizer/cost.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/plancat.h"
+#include "optimizer/planner.h"
+#include "optimizer/planmain.h"
+#include "optimizer/paths.h"
+#include "optimizer/clauses.h"
+#include "optimizer/paramassign.h"
+#include "optimizer/prep.h"
+#include "optimizer/tlist.h"
 
 extern planner_hook_type prev_planner_hook;
 
@@ -61,7 +72,7 @@ static PlannedStmt *auto_index_planner_hook(Query *parse, const char *query_stri
 PGDLLEXPORT void auto_index_worker_main(Datum main_arg);
 void start_auto_index_worker(void);
 
-PG_FUNCTION_INFO_V1(auto_index_force_init);
+// PG_FUNCTION_INFO_V1(auto_index_force_init);
 PG_FUNCTION_INFO_V1(auto_index_cleanup);
 PG_FUNCTION_INFO_V1(my_index_creator);
 
