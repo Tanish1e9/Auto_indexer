@@ -8,7 +8,7 @@ char *table_name_glob = 0;
 char *col_name_glob = 0;
 static void handle_sigterm(int signum){proc_exit(1);}
 static bool in_hook = false;
-bool auto_index_enabled = false;
+bool auto_index_enabled = true;
 
 double compute_index_creation_cost(const char *table_name, const char *colname) {
     Oid relid = RelnameGetRelid(table_name);
@@ -442,7 +442,7 @@ void _PG_init(void)
         NULL,                                                   // no short description
         &auto_index_enabled,                                    // pointer to the variable
         true,                                                   // default value
-        PGC_SIGHUP,                                              // can be set by superuser (can also use PGC_USERSET)
+        PGC_SUSET,                                              // can be set by superuser (can also use PGC_USERSET)
         0,                                                      // GUC flags
         NULL, NULL, NULL                                        // no hooks
     );
