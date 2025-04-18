@@ -228,8 +228,8 @@ static void find_seqscans(Plan *plan, List *rtable)
                     if (ret != SPI_OK_SELECT)
                         elog(ERROR, "SPI_execute failed: error code %d", ret);
                         
-                        int proc = SPI_processed;
-                        elog(LOG, "Rows returned: %d", proc);
+                    int proc = SPI_processed;
+                    elog(LOG, "Rows returned: %d", proc);
                         
                     if(proc == 1){
                         HeapTuple tuple = SPI_tuptable->vals[0];
@@ -245,12 +245,12 @@ static void find_seqscans(Plan *plan, List *rtable)
                         char *colname = isnull ? "<null>" : TextDatumGetCString(colname_datum);
                         
                         // Column 3: cost (float8)
-                        Datum cost_datum = SPI_getbinval(tuple, tupdesc, 3, &isnull);
-                        double cost = isnull ? 0.0 : DatumGetFloat8(cost_datum);
+                        // Datum cost_datum = SPI_getbinval(tuple, tupdesc, 3, &isnull);
+                        // double cost = isnull ? 0.0 : DatumGetFloat8(cost_datum);
                         
                         // Column 4: benefit (float8)
-                        Datum benefit_datum = SPI_getbinval(tuple, tupdesc, 4, &isnull);
-                        double benefit = isnull ? 0.0 : DatumGetFloat8(benefit_datum);
+                        // Datum benefit_datum = SPI_getbinval(tuple, tupdesc, 4, &isnull);
+                        // double benefit = isnull ? 0.0 : DatumGetFloat8(benefit_datum);
                         
                         // Column 5: num_queries (int)
                         Datum num_q_datum = SPI_getbinval(tuple, tupdesc, 5, &isnull);
@@ -259,12 +259,18 @@ static void find_seqscans(Plan *plan, List *rtable)
                         // Column 6: is_indexed (bool)
                         // Datum indexed_datum = SPI_getbinval(tuple, tupdesc, 6, &isnull);
                         // bool is_indexed = isnull ? false : DatumGetBool(indexed_datum);
+
+                        int page_count = 0, tuple_count = 0;
+                        get_table_page_tuple_count(table_name, &page_count, &tuple_count);
+                        double cost = tuple_count;
+                        int height = ceil(log(tuple_count)/log(100));
+                        double benefit = page_count - height;
                         bool is_indexed = my_index_info(table_name, colname);
                         // Log it
-                        elog(LOG, "Row %d: table=%s, column=%s, cost=%.3f, benefit=%.3f, queries=%d, indexed=%s",
+                        elog(LOG, "Row %d: table=%s, column=%s, cost=%.2f, benefit=%.2f, queries=%d, indexed=%s",
                             0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
 
-                            if(!is_indexed){
+                        if(!is_indexed){
                             if((num_queries+1) * benefit > cost){
                                 strcpy(table_name_glob, table_name);
                                 strcpy(col_name_glob, colname);
@@ -275,14 +281,12 @@ static void find_seqscans(Plan *plan, List *rtable)
                         
                         if(is_indexed){
                             query = psprintf(
-                                "UPDATE aidx_queries SET num_queries = num_queries + 1, is_indexed = 't' WHERE tablename = '%s' AND colname = '%s'",
-                                table_name, colname
+                                "UPDATE aidx_queries SET num_queries = num_queries + 1,cost=%.2f, benefit=%.2f, is_indexed = 't' WHERE tablename = '%s' AND colname = '%s'",cost,benefit,table_name, colname
                             );
                         }
                         else{
                             query = psprintf(
-                                "UPDATE aidx_queries SET num_queries = num_queries + 1, is_indexed = 'f' WHERE tablename = '%s' AND colname = '%s'",
-                                table_name, colname
+                                "UPDATE aidx_queries SET num_queries = num_queries + 1,cost=%.2f, benefit=%.2f, is_indexed = 'f' WHERE tablename = '%s' AND colname = '%s'",cost,benefit,table_name, colname
                             );
                         }
                         
