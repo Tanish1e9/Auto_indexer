@@ -295,13 +295,13 @@ static void find_seqscans(Plan *plan, List *rtable)
                         double benefit = page_count - height;
                         if(!ans){
                             query = psprintf(
-                                "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 'f')",
+                                "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 'f') ON CONFLICT (tablename, colname) DO UPDATE SET num_queries = aidx_queries.num_queries + 1",
                                 table_name, colname, cost, benefit
                             );
                         }
                         else{
                             query = psprintf(
-                                "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 't')",
+                                "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 't') ON CONFLICT (tablename, colname) DO UPDATE SET num_queries = aidx_queries.num_queries + 1",
                                 table_name, colname, cost, benefit
                             );
                         }
