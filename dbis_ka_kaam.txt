@@ -56,3 +56,13 @@ clause_selectivity and related functions can be used to calculate selectivity
 
 src/backend/executor/spi.c ----   line 220
 * SPI callers are *always* inside a transaction.
+
+Since our extension is written in shared preload libraries, it's loaded at startup of a backend (PG_init gets called hook is set)
+pg_init gets called at line 284 of dfmgr.c which sets the hook (it's during startup)
+Now who calls this internal_load_library I dont know it's probably too deep and irrelevant
+
+Any new backend process starts at line 76 in backend_startup.c which calls PostgresMain() at line 124
+Now in postgres.c file inside PostgresMain() function at line 4764, exec_simple_query is called
+inside exec_simple_query at line 1192 pg_plan_queries is called inside which at line 994 pg_plan_query is called
+inside pg_plan_query at line 900, planner is called
+Now in planner.c file inside planner function our hook is called at line 292 and rest lies in auto_index file 
