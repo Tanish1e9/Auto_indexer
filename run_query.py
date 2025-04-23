@@ -14,18 +14,13 @@ def run_query(thread_id):
         print(f"[Thread {thread_id}] ✅ Connected to PostgreSQL")
 
         cur = conn.cursor()
-        if(thread_id == 34):
-            query = "create index on advisor(i_id);"
+        for _ in range(10):
+            query = "SELECT * FROM advisor WHERE i_id = '123';"
             cur.execute(query)
-            print(f"[Thread {thread_id}] Created index on advisor(i_id)")
-            conn.commit()
-        else:            
-            for _ in range(10):
-                query = "SELECT * FROM advisor WHERE i_id = '123';"
-                cur.execute(query)
-                rows = cur.fetchall()
-                print(f"[Thread {thread_id}] Got {len(rows)} rows")
-                conn.commit()
+            rows = cur.fetchall()
+            print(f"[Thread {thread_id}] Got {len(rows)} rows")
+            
+        conn.commit()
         cur.close()
         conn.close()
         print(f"[Thread {thread_id}] 🔒 Connection closed")
@@ -38,7 +33,7 @@ def run_query(thread_id):
 
 def main():
     threads = []
-    num_threads = 50  # You can increase this if needed
+    num_threads = 10  # You can increase this if needed
 
     for i in range(num_threads):
         thread = threading.Thread(target=run_query, args=(i,))

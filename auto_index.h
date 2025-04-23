@@ -56,14 +56,12 @@
 #include "utils/guc.h"
 #include <math.h>
 
+#define BUFFER_SIZE 1024
+
 extern planner_hook_type prev_planner_hook;
-
 static PlannedStmt *auto_index_planner_hook(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams);
-
 PGDLLEXPORT void auto_index_worker_main(Datum main_arg);
-void start_auto_index_worker(void);
-
-PG_FUNCTION_INFO_V1(auto_index_force_init);
+void start_auto_index_worker(char* query, bool wait_to_finish);
 PG_FUNCTION_INFO_V1(auto_index_cleanup);
 
 

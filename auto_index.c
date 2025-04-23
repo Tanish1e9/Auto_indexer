@@ -4,13 +4,9 @@ PG_MODULE_MAGIC;
 
 planner_hook_type prev_planner_hook = NULL;
 
-char *table_name_glob = 0;
-char *col_name_glob = 0;
 static void handle_sigterm(int signum){proc_exit(1);}
 static bool in_hook = false;
 bool auto_index_enabled = true;
-static LWLock *MyIndexHashLock = NULL;
-
 
 void get_table_page_tuple_count(const char *table_name, int* page_count, int* tuple_count)
 {
@@ -163,8 +159,7 @@ bool my_index_info(const char *relname, const char* target){
     return ans;
 }
 
-static void find_seqscans(Plan *plan, List *rtable)
-{
+static void find_seqscans(Plan *plan, List *rtable){
     if (plan == NULL)
         return;
 
@@ -175,6 +170,10 @@ static void find_seqscans(Plan *plan, List *rtable)
 
         RangeTblEntry *rte = list_nth_node(RangeTblEntry, rtable, relid_index - 1);
         const char *table_name = get_rel_name(rte->relid);
+        if(strcmp(table_name,"aidx_queries")==0){
+            elog(LOG, "Skipping aidx_queries table");
+            return;
+        }
         Oid relid = rte->relid;
         Oid nspid = get_rel_namespace(relid);
         const char *nspname = get_namespace_name(nspid);
@@ -215,11 +214,13 @@ static void find_seqscans(Plan *plan, List *rtable)
                     char *colname = (char *) lfirst(cell);
                     elog(LOG, "Column used in WHERE clause: %s", colname);
 
-                    char *query = psprintf(
+                    char *query = palloc(BUFFER_SIZE);
+                    snprintf(query, BUFFER_SIZE,
                         "SELECT tablename, colname, cost, benefit, num_queries, is_indexed "
                         "FROM aidx_queries WHERE tablename = '%s' AND colname = '%s'",
                         table_name, colname
                     );
+
                     int ret = SPI_connect();
                     if (ret != SPI_OK_CONNECT)
                     elog(ERROR, "SPI_connect failed: error code %d", ret);
@@ -227,6 +228,7 @@ static void find_seqscans(Plan *plan, List *rtable)
                     ret = SPI_execute(query, true, 0);  // read-only, unlimited rows
                     if (ret != SPI_OK_SELECT)
                         elog(ERROR, "SPI_execute failed: error code %d", ret);
+                    pfree(query);
                         
                     int proc = SPI_processed;
                     elog(LOG, "Rows returned: %d", proc);
@@ -263,31 +265,33 @@ static void find_seqscans(Plan *plan, List *rtable)
                         int page_count = 0, tuple_count = 0;
                         get_table_page_tuple_count(table_name, &page_count, &tuple_count);
                         bool is_indexed = my_index_info(table_name, colname);
-                        double cost = 120;
-                        double benefit = 40;
-                        // double cost = tuple_count;
-                        // int height = ceil(log(tuple_count)/log(100));
-                        // double benefit = page_count - height;
+                        // double cost = 120;
+                        // double benefit = 40;
+                        double cost = tuple_count;
+                        int height = ceil(log(tuple_count)/log(100));
+                        double benefit = page_count - height;
                         // Log it
                         elog(LOG, "Row %d: table=%s, column=%s, cost=%.2f, benefit=%.2f, queries=%d, indexed=%s",
                             0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
 
                         if(!is_indexed){
                             if((num_queries+1) * benefit > cost){
-                                strcpy(table_name_glob, table_name);
-                                strcpy(col_name_glob, colname);
                                 is_indexed = true;
-                                start_auto_index_worker();
+                                snprintf(query, BUFFER_SIZE,
+                                    "create index if not exists my_index_%s_%s on %s (%s);",
+                                    tablename, colname, tablename, colname
+                                );
+                                start_auto_index_worker(query,false);
                             }
                         }
                         
                         if(is_indexed){
-                            query = psprintf(
+                            snprintf(query, BUFFER_SIZE,
                                 "UPDATE aidx_queries SET num_queries = num_queries + 1,cost=%.2f, benefit=%.2f, is_indexed = 't' WHERE tablename = '%s' AND colname = '%s'",cost,benefit,table_name, colname
                             );
                         }
                         else{
-                            query = psprintf(
+                            snprintf(query, BUFFER_SIZE,
                                 "UPDATE aidx_queries SET num_queries = num_queries + 1,cost=%.2f, benefit=%.2f, is_indexed = 'f' WHERE tablename = '%s' AND colname = '%s'",cost,benefit,table_name, colname
                             );
                         }
@@ -296,19 +300,19 @@ static void find_seqscans(Plan *plan, List *rtable)
                         bool ans = my_index_info(table_name, colname);
                         int page_count = 0, tuple_count = 0;
                         get_table_page_tuple_count(table_name, &page_count, &tuple_count);
-                        // double cost = tuple_count;
-                        // int height = ceil(log(tuple_count)/log(100));
-                        // double benefit = page_count - height;
-                        double cost = 120;
-                        double benefit = 40;
+                        double cost = tuple_count;
+                        int height = ceil(log(tuple_count)/log(100));
+                        double benefit = page_count - height;
+                        // double cost = 120;
+                        // double benefit = 40;
                         if(!ans){
-                            query = psprintf(
+                            snprintf(query, BUFFER_SIZE,
                                 "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 'f') ON CONFLICT (tablename, colname) DO UPDATE SET num_queries = aidx_queries.num_queries + 1",
                                 table_name, colname, cost, benefit
                             );
                         }
                         else{
-                            query = psprintf(
+                            snprintf(query, BUFFER_SIZE,
                                 "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 't') ON CONFLICT (tablename, colname) DO UPDATE SET num_queries = aidx_queries.num_queries + 1",
                                 table_name, colname, cost, benefit
                             );
@@ -328,14 +332,9 @@ static void find_seqscans(Plan *plan, List *rtable)
 
 PGDLLEXPORT void
 auto_index_worker_main(Datum main_arg){
-    const char *input = MyBgworkerEntry->bgw_extra;
-
-    char table_name[64], column_name[64];
-    sscanf(input, "%63[^|]|%63s", table_name, column_name);
-
-
+    const char *query = MyBgworkerEntry->bgw_extra;
+    elog(LOG, "INSIDE WORKER's MAIN FUNCTION with query: %s!!!!",query);
 	BackgroundWorkerInitializeConnection("postgres", NULL , 0);
-    elog(LOG, "WORKER FUNCTION IS RUNNING!!!!");
 
     pqsignal(SIGTERM, handle_sigterm);
     BackgroundWorkerUnblockSignals();
@@ -349,22 +348,18 @@ auto_index_worker_main(Datum main_arg){
         proc_exit(1);
     }
 
-    StringInfoData query;
-    initStringInfo(&query);
-    appendStringInfo(&query,
-        "create index if not exists my_index_%s_%s on %s (%s);",
-        table_name, column_name, table_name, column_name);
-
-    int ret = SPI_execute(query.data, false, 0);
+    int ret = SPI_execute(query, false, 0);
 	if(ret < 0){
 		elog(WARNING, "AutoIndexWorker: SPI_exec failed in worker main");
 		SPI_finish();
 		AbortCurrentTransaction();
 		proc_exit(1);
 	}
+    else{
+        elog(LOG, "AutoIndexWorker: SPI_exec successful");
+        elog(LOG, "AutoIndexWorker: SPI processed %lu rows", SPI_processed);
+    }
 
-	elog(LOG, "AutoIndexWorker: SPI_exec successful");
-	elog(LOG, "AutoIndexWorker: SPI processed %lu rows", SPI_processed);
 
     SPI_finish();
 	PopActiveSnapshot();
@@ -376,13 +371,12 @@ auto_index_worker_main(Datum main_arg){
 
 static PlannedStmt *
 auto_index_planner_hook(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams){
-    elog(LOG, "AutoIndex: Planner hook triggered");
-
     PlannedStmt *stmt = prev_planner_hook ? 
-                        prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
-                        standard_planner(parse, query_string, cursorOptions, boundParams);
+    prev_planner_hook(parse, query_string, cursorOptions, boundParams) : 
+    standard_planner(parse, query_string, cursorOptions, boundParams);
 
 	if (stmt && !in_hook && auto_index_enabled){
+        elog(LOG, "AutoIndex: Planner hook triggered");
         in_hook = true;
 		find_seqscans(stmt->planTree, stmt->rtable);
         in_hook = false;
@@ -391,7 +385,7 @@ auto_index_planner_hook(Query *parse, const char *query_string, int cursorOption
     return stmt;
 }
 
-void start_auto_index_worker(void) {
+void start_auto_index_worker(char* query, bool wait_to_finish) {
     BackgroundWorker worker;
     BackgroundWorkerHandle *handle;
     BgwHandleStatus status;
@@ -406,8 +400,9 @@ void start_auto_index_worker(void) {
     sprintf(worker.bgw_function_name, "auto_index_worker_main");
 
     // Setup bgw_extra
-    snprintf(worker.bgw_extra, BGW_EXTRALEN, "%s|%s", table_name_glob, col_name_glob);
+    snprintf(worker.bgw_extra, BGW_EXTRALEN, "%s", query);
     worker.bgw_notify_pid = MyProcPid;
+    pfree(query);
 
     // Start the worker process 
     if (!RegisterDynamicBackgroundWorker(&worker, &handle)) {
@@ -421,6 +416,15 @@ void start_auto_index_worker(void) {
         elog(LOG, "AutoIndex Worker started with PID: %d", pid);
     } else {
         elog(WARNING, "AutoIndex Worker failed to start");
+    }
+
+    if(wait_to_finish){
+        status = WaitForBackgroundWorkerShutdown(handle);
+        if(status == BGWH_STOPPED) {
+            elog(LOG, "AutoIndex Worker stopped");
+        } else {
+            elog(WARNING, "AutoIndex Worker did not stop as expected");
+        }
     }
 }
 
@@ -442,25 +446,6 @@ void _PG_init(void)
 		prev_planner_hook = planner_hook;
 		planner_hook = auto_index_planner_hook;
 	}
-
-    table_name_glob = (char*)(malloc (64 * sizeof(char)));
-    col_name_glob = (char*)(malloc (64 * sizeof(char)));
-}
-
-Datum
-auto_index_force_init(PG_FUNCTION_ARGS)
-{
-    elog(LOG, "auto_index_force_init() was called!");
-    auto_index_enabled = true;
-    // if(auto_index_enabled) return;
-	// if (planner_hook != auto_index_planner_hook){
-	// 	prev_planner_hook = planner_hook;
-	// 	planner_hook = auto_index_planner_hook;
-	// }
-
-    // table_name_glob = (char*)(malloc (64 * sizeof(char)));
-    // col_name_glob = (char*)(malloc (64 * sizeof(char)));
-    PG_RETURN_VOID();
 }
 
 Datum
@@ -482,8 +467,6 @@ auto_index_cleanup(PG_FUNCTION_ARGS)
 	SPI_execute("DROP FUNCTION IF EXISTS auto_index_cleanup();", false, 0);
 
 	SPI_finish();
-    free(table_name_glob);
-    free(col_name_glob);
 
     PG_RETURN_VOID();
 }
