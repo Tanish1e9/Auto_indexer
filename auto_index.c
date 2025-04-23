@@ -262,10 +262,12 @@ static void find_seqscans(Plan *plan, List *rtable)
 
                         int page_count = 0, tuple_count = 0;
                         get_table_page_tuple_count(table_name, &page_count, &tuple_count);
-                        double cost = tuple_count;
-                        int height = ceil(log(tuple_count)/log(100));
-                        double benefit = page_count - height;
                         bool is_indexed = my_index_info(table_name, colname);
+                        double cost = 120;
+                        double benefit = 40;
+                        // double cost = tuple_count;
+                        // int height = ceil(log(tuple_count)/log(100));
+                        // double benefit = page_count - height;
                         // Log it
                         elog(LOG, "Row %d: table=%s, column=%s, cost=%.2f, benefit=%.2f, queries=%d, indexed=%s",
                             0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
@@ -294,9 +296,11 @@ static void find_seqscans(Plan *plan, List *rtable)
                         bool ans = my_index_info(table_name, colname);
                         int page_count = 0, tuple_count = 0;
                         get_table_page_tuple_count(table_name, &page_count, &tuple_count);
-                        double cost = tuple_count;
-                        int height = ceil(log(tuple_count)/log(100));
-                        double benefit = page_count - height;
+                        // double cost = tuple_count;
+                        // int height = ceil(log(tuple_count)/log(100));
+                        // double benefit = page_count - height;
+                        double cost = 120;
+                        double benefit = 40;
                         if(!ans){
                             query = psprintf(
                                 "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 'f') ON CONFLICT (tablename, colname) DO UPDATE SET num_queries = aidx_queries.num_queries + 1",
@@ -348,11 +352,12 @@ auto_index_worker_main(Datum main_arg){
     StringInfoData query;
     initStringInfo(&query);
     appendStringInfo(&query,
-        "select my_index_creator('%s','%s');", table_name, column_name);
+        "create index if not exists my_index_%s_%s on %s (%s);",
+        table_name, column_name, table_name, column_name);
 
-    int ret = SPI_execute(query.data, true, 0);
-	if(ret != SPI_OK_SELECT){
-		elog(WARNING, "AutoIndexWorker: SPI_exec failed for SELECT");
+    int ret = SPI_execute(query.data, false, 0);
+	if(ret < 0){
+		elog(WARNING, "AutoIndexWorker: SPI_exec failed in worker main");
 		SPI_finish();
 		AbortCurrentTransaction();
 		proc_exit(1);
@@ -480,39 +485,5 @@ auto_index_cleanup(PG_FUNCTION_ARGS)
     free(table_name_glob);
     free(col_name_glob);
 
-    PG_RETURN_VOID();
-}
-
-Datum
-my_index_creator(PG_FUNCTION_ARGS)
-{
-    // Get the first argument (table name)
-    text *table_text = PG_GETARG_TEXT_PP(0);
-    char *table_name = text_to_cstring(table_text);
-
-    // Get the second argument (column name)
-    text *col_text = PG_GETARG_TEXT_PP(1);
-    char *col_name = text_to_cstring(col_text);
-
-    if(table_name == NULL || col_name == NULL){
-        elog(ERROR, "Table or column name is NULL");
-        proc_exit(1);
-    }
-
-    elog(LOG, "Creating index on %s.%s", table_name, col_name);
-    StringInfoData query;
-    initStringInfo(&query);
-    appendStringInfo(&query,
-        "CREATE INDEX IF NOT EXISTS my_index_%s_%s ON %s (%s);",
-        table_name, col_name, table_name, col_name);
-
-    if (SPI_connect() != SPI_OK_CONNECT)
-        elog(ERROR, "SPI_connect failed");
-
-    int ret = SPI_execute(query.data, false, 0);
-    if (ret != SPI_OK_UTILITY)
-        elog(ERROR, "Index creation failed");
-
-    SPI_finish();
     PG_RETURN_VOID();
 }
