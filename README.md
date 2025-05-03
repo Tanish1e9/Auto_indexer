@@ -21,7 +21,7 @@ The following steps describe how to integrate the `auto_index` extension into yo
 
 1. **Adding the Extension**
    - Copy the `auto_index` folder into the `contrib` directory of your PostgreSQL source tree.
-   - Add `auto_index` to the `shared_preload_libraries` setting in the `postgresql.conf` file of your PostgreSQL server:
+   - Add `auto_index` to the `shared_preload_libraries` setting in the `postgresql.conf` file of your database:
      ```conf
      shared_preload_libraries = 'auto_index'
      ```
