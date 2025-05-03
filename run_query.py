@@ -33,7 +33,7 @@ def run_query(thread_id):
 
 def main():
     threads = []
-    num_threads = 10  # You can increase this if needed
+    num_threads = 1
 
     for i in range(num_threads):
         thread = threading.Thread(target=run_query, args=(i,))
