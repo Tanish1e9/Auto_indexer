@@ -198,7 +198,6 @@ static void find_seqscans(Plan *plan, List *rtable){
             return;
         }
 
-
         elog(LOG, "SeqScan on table: %s", table_name);
         elog(LOG, "SeqScan cost: %.2f", plan->startup_cost + plan->total_cost);
     
@@ -267,11 +266,13 @@ static void find_seqscans(Plan *plan, List *rtable){
                         int page_count = 0, tuple_count = 0;
                         get_table_page_tuple_count(table_name, &page_count, &tuple_count);
                         bool is_indexed = my_index_info(table_name, colname);
-                        // double cost = 120;
-                        // double benefit = 40;
+                        
                         double cost = tuple_count;
-                        int height = ceil(log(tuple_count)/log(100));
+                        if(cost<=0) cost = 100;
+                        int height = ceil(log(cost)/log(100));
                         double benefit = page_count - height;
+                        if(benefit<=0) benefit = 1;
+
                         // Log it
                         elog(LOG, "Row %d: table=%s, column=%s, cost=%.2f, benefit=%.2f, queries=%d, indexed=%s",
                             0, tablename, colname, cost, benefit, num_queries, is_indexed ? "true" : "false");
@@ -302,11 +303,13 @@ static void find_seqscans(Plan *plan, List *rtable){
                         bool ans = my_index_info(table_name, colname);
                         int page_count = 0, tuple_count = 0;
                         get_table_page_tuple_count(table_name, &page_count, &tuple_count);
+
                         double cost = tuple_count;
-                        int height = ceil(log(tuple_count)/log(100));
+                        if(cost<=0) cost = 100;
+                        int height = ceil(log(cost)/log(100));
                         double benefit = page_count - height;
-                        // double cost = 120;
-                        // double benefit = 40;
+                        if(benefit<=0) benefit = 1;
+            
                         if(!ans){
                             snprintf(query, BUFFER_SIZE,
                                 "INSERT INTO aidx_queries values('%s', '%s', %.2f, %.2f, 1, 'f') ON CONFLICT (tablename, colname) DO UPDATE SET num_queries = aidx_queries.num_queries + 1",
