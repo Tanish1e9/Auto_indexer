@@ -59,6 +59,7 @@ extract_columns_from_expr(Node *node, List *rtable)
             if (rte->rtekind == RTE_RELATION)
             {
                 const char *colname = get_attname(rte->relid, var->varattno, false);
+                // l stands for list 
                 colnames = lappend(colnames, pstrdup(colname));
             }
         }
@@ -97,7 +98,7 @@ bool my_index_info(const char *relname, const char* target){
     List *indexList;
     ListCell *lc;
     
-    // Step 1: Resolve table OID
+    // Resolve table OID
     relid = RelnameGetRelid(relname);
     if (!OidIsValid(relid))
     {
@@ -105,7 +106,7 @@ bool my_index_info(const char *relname, const char* target){
         return;
     }
     
-    // Step 2: Open relation
+    // Open relation
     rel = relation_open(relid, AccessShareLock);
     if (rel == NULL)
     {
@@ -113,7 +114,7 @@ bool my_index_info(const char *relname, const char* target){
         return;
     }
     
-    // Step 3: Get list of indexes
+    // Get list of indexes
     indexList = RelationGetIndexList(rel);
     if (indexList == NIL)
     {
@@ -190,7 +191,7 @@ static void find_seqscans(Plan *plan, List *rtable){
             return;
         }
 
-        // Optional: check if current user can SELECT from the table
+        // Check if current user can SELECT from the table
         if (pg_class_aclcheck(relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
         {
             elog(LOG, "Skipping table %s: no SELECT permissions", table_name);
@@ -201,6 +202,7 @@ static void find_seqscans(Plan *plan, List *rtable){
         elog(LOG, "SeqScan on table: %s", table_name);
         elog(LOG, "SeqScan cost: %.2f", plan->startup_cost + plan->total_cost);
     
+        // if WHERE clause exists
         if (plan->qual)
         {
             ListCell *lc;
