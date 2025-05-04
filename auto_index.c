@@ -103,7 +103,7 @@ bool my_index_info(const char *relname, const char* target){
     if (!OidIsValid(relid))
     {
         elog(LOG, "Relation %s not found", relname);
-        return;
+        return false;
     }
     
     // Open relation
@@ -111,7 +111,7 @@ bool my_index_info(const char *relname, const char* target){
     if (rel == NULL)
     {
         elog(LOG, "Could not open relation %s", relname);
-        return;
+        return false;
     }
     
     // Get list of indexes
@@ -120,7 +120,7 @@ bool my_index_info(const char *relname, const char* target){
     {
         elog(INFO, "Relation %s has no indexes", relname);
         relation_close(rel, AccessShareLock);
-        return;
+        return false;
     }
     
     foreach(lc, indexList)
@@ -372,7 +372,6 @@ auto_index_worker_main(Datum main_arg){
 
     elog(LOG, "AutoIndexWorker: Index creation completed, exiting.");
 }
-
 
 static PlannedStmt *
 auto_index_planner_hook(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams){
